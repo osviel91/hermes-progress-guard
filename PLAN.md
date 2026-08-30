@@ -1,6 +1,6 @@
 # Hermes Progress Guard — Implementation Plan (Phase 1)
 
-Status: planning (grounded in Hermes-Agent commit `4f22543`, 2026-08-30)
+Status: **Phase 1 implemented** (`plugins/progress-guard/`, 37 tests passing).
 Author: handoff from prior agent + analysis of actual Hermes source
 
 ## 0. Executive summary
@@ -326,10 +326,26 @@ disabled by removing it from `plugins.enabled`.
 
 ## 13. Open decisions before implementation
 
-1. Confirm thresholds (defaults above are conservative; tuning comes from
-   real traces — handoff §22).
-2. Whether `recovery_count` should be per-turn (proposed) or per-session.
-   Handoff §7 says per-turn isolation; §14's "hard stop after N stalls" reads
-   naturally per-turn.
-3. Whether to merge `normalize.py` into `fingerprint.py` (implementation-time
-   call).
+Resolved during implementation:
+
+1. **Thresholds confirmed** as proposed (conservative; tuning comes from real
+   traces — handoff §22).
+2. **`recovery_count` is per-turn** (matches handoff §7 per-turn isolation and
+   §14's per-turn hard-stop budget). `max_attempts: 2`.
+3. **`normalize.py` merged into fingerprint path** — kept as its own small
+   module; `error_class()` lives there too.
+4. **Progress decay rule** (implemented in `policy.score_delta`): mutation -3 /
+   changed-result -2 apply **only when no detector is firing**. This is the key
+   guard against false positives: `A B A B` with fresh results still
+   accumulates (cycle +2), while legitimate polling and diverse work stay at 0.
+
+### Deliberate simplifications (ponytail)
+
+- Detectors live in one `detectors.py` module instead of five files
+  (handoff §5 structure kept only where it earns its keep).
+- Plugin blocks via `pre_tool_call` `{action: block}`; no core turn-halt
+  (not plugin-exposed). The model receives the hard-stop message as the tool
+  result and produces the final report — same outcome without forking.
+- `transform_tool_result` recovery guidance is best-effort (first-valid-string
+  wins in Hermes; another plugin could win the injection). Hard stop is
+  unaffected.
