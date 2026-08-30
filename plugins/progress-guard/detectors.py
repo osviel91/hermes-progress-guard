@@ -72,6 +72,12 @@ def cycle(events: Sequence[ToolEvent], cfg: Any) -> bool:
         base = tail[:length]
         if len(set(base)) < 2:
             continue
+        if any(e.is_mutation for e in events if e.tool_name in base):
+            # write_file -> terminal -> write_file -> terminal is iterative
+            # development (write, run, tweak, run), i.e. progress — not a
+            # loop. A mutating tool in the period means each repetition
+            # changes state (handoff §16); reads/searches don't.
+            continue
         if all(
             tail[i * length:(i + 1) * length] == base
             for i in range(cfg.repetitions)

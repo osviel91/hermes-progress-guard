@@ -105,6 +105,26 @@ def test_cycle_respects_window(ev):
     assert _run(detectors.cycle, events, cfg) is True  # last 4: X Y X Y
 
 
+def test_cycle_ignores_mutation_iteration(ev):
+    # write_file -> terminal -> write_file -> terminal is iterative dev
+    # (write, run, tweak, run) = progress, NOT a loop (handoff §16)
+    events = [
+        ev("write_file", {"f": "a"}, "ok", is_mutation=True),
+        ev("terminal", {}, "r1", is_mutation=True),
+        ev("write_file", {"f": "b"}, "ok", is_mutation=True),
+        ev("terminal", {}, "r2", is_mutation=True),
+    ]
+    assert _run(detectors.cycle, events) is False
+
+
+def test_cycle_still_detects_read_search_alternation(ev):
+    events = [
+        ev("search", {"q": "x"}, "r1"), ev("read_file", {}, "r2"),
+        ev("search", {"q": "x"}, "r3"), ev("read_file", {}, "r4"),
+    ]
+    assert _run(detectors.cycle, events) is True
+
+
 def test_repeated_failure_same_error_class(ev):
     events = [
         ev("patch", {"f": "a"}, status="error", error_type="PatchError", error_message="context mismatch line 3"),
