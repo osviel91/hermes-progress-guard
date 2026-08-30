@@ -8,7 +8,7 @@ as a Hermes Python plugin. Complements Hermes' built-in tool guardrails
 
 ## Status
 
-Phase 1 MVP implemented and tested (46 tests passing).
+Phase 1 MVP implemented and tested (49 tests passing).
 
 - `plugins/progress-guard/` — the plugin (fingerprinting, exact repeat,
   identical result, cycle, repeated failure, **reasoning/thinking-loop
@@ -40,6 +40,16 @@ plugins:
 Without it, the hook never receives reasoning text and the detector is inert.
 Threshold: `reasoning_loop.threshold` (default 3 consecutive identical
 reasoning segments); disable via `reasoning_loop.enabled: false`.
+
+### Repeated-failure detection (error-class normalization)
+
+Hermes reports terminal/script failures with a generic `error_type='tool_error'`
+and a generic message (`Script exited with code 1`), so the plugin groups
+repeated failures by a **de-noised signature of the actual result output**
+(line numbers, paths, hex IDs, digits stripped) whenever the message is
+generic. Genuinely different failing commands therefore do **not** merge into
+one class, while `patch(A)`/`patch(B)` with the same `context mismatch at
+line N` still collapse correctly.
 
 Out of scope for Phase 1 (planned later): semantic similarity, LLM judge,
 Definition of Done / completion gate.
