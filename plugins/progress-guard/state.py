@@ -28,6 +28,8 @@ class TurnState:
         self.reasoning_tail: str = ""
         self.reasoning_run: int = 0
         self.reasoning_flagged: bool = False
+        self.reasoning_deltas: int = 0
+        self.reasoning_chars: int = 0
         self.last_iteration: Optional[str] = None
 
     def push(self, event: ToolEvent) -> None:

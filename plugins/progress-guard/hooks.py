@@ -186,15 +186,29 @@ class ProgressGuard:
             state.reasoning_tail = ""
             state.reasoning_run = 0
             state.reasoning_flagged = False
+            state.reasoning_deltas = 0
+            state.reasoning_chars = 0
             state.last_iteration = it
 
         state.reasoning_tail += delta
+        state.reasoning_deltas += 1
+        state.reasoning_chars += len(delta)
         while "\n" in state.reasoning_tail:
             line, state.reasoning_tail = state.reasoning_tail.split("\n", 1)
             if line.strip():
                 state.reasoning_segments.append(line)
 
         run = repeated_thinking(list(state.reasoning_segments), rl.threshold)
+        if self.cfg.debug and state.reasoning_deltas % 200 == 0:
+            prev = ""
+            if state.reasoning_segments:
+                prev = str(state.reasoning_segments[-1]).strip()[-120:]
+            logger.warning(
+                "[progress-guard] reasoning deltas=%d chars=%d segments=%d "
+                "run=%d last='%s'",
+                state.reasoning_deltas, state.reasoning_chars,
+                len(state.reasoning_segments), run, prev,
+            )
         if run >= rl.threshold and not state.reasoning_flagged:
             state.reasoning_flagged = True
             state.reasoning_run = run
