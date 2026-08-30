@@ -130,3 +130,28 @@ def test_repeated_failure_ignores_successes(ev):
         ev("patch", {"f": "a"}, "ok"),
     ]
     assert _run(detectors.repeated_failure, events) == 0
+
+
+def test_repeated_thinking_consecutive_identical(ev):
+    segs = ["same thought", "same thought", "same thought"]
+    assert detectors.repeated_thinking(segs, 3) == 3
+
+
+def test_repeated_thinking_diverse_is_zero(ev):
+    segs = ["check path", "check glob", "iterate parent"]
+    assert detectors.repeated_thinking(segs, 3) == 1
+
+
+def test_repeated_thinking_below_threshold(ev):
+    segs = ["thought", "thought", "different"]
+    assert detectors.repeated_thinking(segs, 3) == 2
+
+
+def test_repeated_thinking_empty(ev):
+    assert detectors.repeated_thinking([], 3) == 0
+
+
+def test_repeated_thinking_blank_lines_skipped(ev):
+    # blank lines are whitespace; identical non-blank segments still count
+    segs = ["a", "", "a", "a"]
+    assert detectors.repeated_thinking(segs, 3) == 3

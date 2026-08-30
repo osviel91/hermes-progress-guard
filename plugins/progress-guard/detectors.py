@@ -92,6 +92,26 @@ def repeated_failure(events: Sequence[ToolEvent], cfg: Any) -> int:
     return max(counts.values(), default=0)
 
 
+def repeated_thinking(segments: Sequence[str], threshold: int) -> int:
+    """Longest consecutive run of identical reasoning segments.
+
+    Segments are the completed, stripped lines of the ``kind="reasoning"``
+    stream (fed from ``on_stream_delta``). A pure thinking loop repeats the
+    same block verbatim dozens of times; consecutive identical segments is
+    the cheap deterministic signal (no embeddings).
+    """
+    best, run, prev = 0, 0, None
+    for s in segments:
+        s = s.strip()
+        if not s:
+            continue
+        run = run + 1 if s == prev else 1
+        prev = s
+        if run > best:
+            best = run
+    return best
+
+
 def evaluate(events: Sequence[ToolEvent], cfg: Any) -> Dict[str, Any]:
     """All signals at once; the hooks pass the result to the policy."""
     return {

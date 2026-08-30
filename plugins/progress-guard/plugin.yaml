@@ -2,9 +2,17 @@ name: progress-guard
 version: "0.1.0"
 description: "Deterministic stall/loop protection for Hermes Agent. Watches the tool-call stream and detects exact-repeated calls, alternating cycles, identical stagnant results and repeated failure classes; injects guided replan guidance when a strategy stalls and enforces a bounded recovery budget with a safe hard stop. Complementary second layer on top of Hermes built-in tool guardrails — no second LLM, no embeddings."
 author: "hermes-progress-guard"
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - transform_tool_result
+  - on_stream_delta
+  - on_session_end
+  - on_session_reset
 hooks:
   - pre_tool_call
   - post_tool_call
   - transform_tool_result
+  - on_stream_delta
   - on_session_end
   - on_session_reset

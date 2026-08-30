@@ -36,7 +36,8 @@ def debug_line(
         return
     logger.warning(
         "[progress-guard] tool=%s session=%s turn=%s exact_repeat=%s "
-        "result_repeat=%s cycle=%s failure_repeat=%s stall_score=%d decision=%s",
+        "result_repeat=%s cycle=%s failure_repeat=%s thinking_repeat=%s "
+        "stall_score=%d decision=%s",
         tool_name,
         session_id or "-",
         turn_id or "-",
@@ -44,6 +45,7 @@ def debug_line(
         signals.get("identical_result", 0),
         _flag(signals.get("cycle", False)),
         signals.get("repeated_failure", 0),
+        signals.get("thinking_repeat", 0),
         score,
         decision,
     )

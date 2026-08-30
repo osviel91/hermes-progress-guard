@@ -8,11 +8,12 @@ as a Hermes Python plugin. Complements Hermes' built-in tool guardrails
 
 ## Status
 
-Phase 1 MVP implemented and tested (37 tests passing).
+Phase 1 MVP implemented and tested (46 tests passing).
 
 - `plugins/progress-guard/` — the plugin (fingerprinting, exact repeat,
-  identical result, cycle, repeated failure, stagnation score, guided
-  recovery, recovery budget, hard stop, metrics, debug mode).
+  identical result, cycle, repeated failure, **reasoning/thinking-loop
+  detection**, stagnation score, guided recovery, recovery budget, hard stop,
+  metrics, debug mode).
 - `tests/` — unit tests per detector + integration scenarios A–E simulating
   the agent loop (hooks driven directly, no Hermes runtime required).
 
@@ -25,6 +26,22 @@ Run tests: `python -m pytest tests/ -q`
    (see `PLAN.md` §8 for the full schema; defaults are conservative).
 3. `hermes plugins enable progress-guard`
 
+### Thinking-loop detection (reasoning deltas)
+
+The plugin also watches `kind="reasoning"` stream deltas to catch pure
+thinking loops that emit no tool calls. This requires Hermes' global opt-in
+in `config.yaml`:
+
+```yaml
+plugins:
+  stream_reasoning_deltas: true
+```
+
+Without it, the hook never receives reasoning text and the detector is inert.
+Threshold: `reasoning_loop.threshold` (default 3 consecutive identical
+reasoning segments); disable via `reasoning_loop.enabled: false`.
+
 Out of scope for Phase 1 (planned later): semantic similarity, LLM judge,
 Definition of Done / completion gate.
+
 

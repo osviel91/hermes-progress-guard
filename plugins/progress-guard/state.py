@@ -21,7 +21,14 @@ class TurnState:
         self.hard_stop: bool = False
         self.last_result_fingerprint: Optional[str] = None
         self.pending_recovery: Optional[str] = None
+        self.pending_thinking_recovery: bool = False
         self.created_at: float = time.monotonic()
+        # reasoning-loop tracking (on_stream_delta, kind="reasoning")
+        self.reasoning_segments: deque = deque(maxlen=64)
+        self.reasoning_tail: str = ""
+        self.reasoning_run: int = 0
+        self.reasoning_flagged: bool = False
+        self.last_iteration: Optional[str] = None
 
     def push(self, event: ToolEvent) -> None:
         self.events.append(event)

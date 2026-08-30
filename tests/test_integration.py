@@ -8,10 +8,20 @@ from hermes_plugins.progress_guard.config import ProgressGuardConfig
 
 RECOVERY_MARKER = "PROGRESS GUARD: CURRENT STRATEGY STALLED"
 HARD_STOP_MARKER = "PROGRESS GUARD: STRATEGY EXHAUSTED"
+THINKING_MARKER = "PROGRESS GUARD: THINKING LOOP DETECTED"
 
 
 def ok(tool, args, result="ok"):
     return (tool, args, result, "ok", None, None)
+
+
+def _reason(drive_ctx, block, session="s1", turn="t1", iteration="1", times=6):
+    """Stream a reasoning block verbatim `times` times (one line per delta)."""
+    for _ in range(times):
+        drive_ctx.hooks["on_stream_delta"](
+            delta=block + "\n", kind="reasoning",
+            session_id=session, turn_id=turn, iteration=iteration,
+        )
 
 
 def _injections(records):
@@ -152,3 +162,63 @@ def test_disabled_guard_does_nothing(drive):
     assert _blocks(records) == []
     assert _injections(records) == []
     assert guard.metrics.snapshot() == {}
+
+
+def test_thinking_loop_detected_and_injects_on_next_tool(make_guard):
+    ctx, guard = make_guard()
+    _reason(ctx, "The glob output showed a slightly different name. Let me iterate over the parent directory instead.")
+    m = guard.metrics.snapshot()
+    assert m.get("thinking_loops", 0) >= 1
+    assert guard.registry.get("s1", "t1").stall_score >= 4
+
+    # the model finally emits a tool call -> its result carries the guidance
+    call_id = "call-1"
+    ctx.hooks["pre_tool_call"](tool_name="search_files", session_id="s1", turn_id="t1")
+    ctx.hooks["post_tool_call"](
+        tool_name="search_files", args={"q": "x"}, result="found",
+        session_id="s1", turn_id="t1", tool_call_id=call_id, status="ok",
+    )
+    transformed = ctx.hooks["transform_tool_result"](
+        tool_name="search_files", result="found",
+        session_id="s1", turn_id="t1", tool_call_id=call_id,
+    )
+    assert THINKING_MARKER in transformed
+
+
+def test_thinking_loop_escapes_to_hard_stop(make_guard):
+    ctx, guard = make_guard()
+    state = guard.registry.get("s1", "t1")
+    for iteration in range(3):
+        _reason(ctx, "same recurring thought without progress", iteration=str(iteration + 1))
+    # 3 loops > max_attempts(2) -> recovery budget exhausted
+    assert state.recovery_count == 3
+    assert state.hard_stop is True
+
+    # next tool call is hard-blocked
+    pre = ctx.hooks["pre_tool_call"](tool_name="search_files", session_id="s1", turn_id="t1")
+    assert pre is not None and pre["action"] == "block"
+    assert HARD_STOP_MARKER in pre["message"]
+
+
+def test_thinking_loop_ignores_diverse_reasoning(make_guard):
+    ctx, guard = make_guard()
+    for line in ["check the path", "check the glob output", "em-dash encoding", "iterate over parent dir"]:
+        ctx.hooks["on_stream_delta"](
+            delta=line + "\n", kind="reasoning",
+            session_id="s1", turn_id="t1", iteration="1",
+        )
+    assert guard.metrics.snapshot().get("thinking_loops", 0) == 0
+    assert guard.registry.get("s1", "t1").stall_score == 0
+
+
+def test_thinking_loop_resets_per_iteration(make_guard):
+    ctx, guard = make_guard()
+    # one repetition per iteration is normal (no run >= threshold within an iteration)
+    for i in range(4):
+        for _ in range(2):
+            ctx.hooks["on_stream_delta"](
+                delta="repeated-ish thought\n", kind="reasoning",
+                session_id="s1", turn_id="t1", iteration=str(i + 1),
+            )
+    assert guard.metrics.snapshot().get("thinking_loops", 0) == 0
+    assert guard.registry.get("s1", "t1").stall_score == 0

@@ -38,6 +38,15 @@ _HARD_STOP_TEMPLATE = (
     "Do not invent success."
 )
 
+_THINKING_TEMPLATE = (
+    "PROGRESS GUARD: THINKING LOOP DETECTED\n"
+    "The reasoning stream has been repeating the same content verbatim "
+    "without converging and without calling any tool.\n"
+    "Stop re-reasoning about the same point. Decide what single concrete "
+    "action is missing and take it, or report the blocker.\n"
+    "Do not repeat the same thought again."
+)
+
 
 def evidence_list(events: List[ToolEvent], limit: int = 6) -> str:
     """Sanitized preview: tool names only, no args/result contents."""
@@ -50,3 +59,7 @@ def recovery_message(events: List[ToolEvent], limit: int = 6) -> str:
 
 def hard_stop_message() -> str:
     return _HARD_STOP_TEMPLATE
+
+
+def thinking_recovery_message() -> str:
+    return _THINKING_TEMPLATE

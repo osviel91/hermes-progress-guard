@@ -1,6 +1,6 @@
 # Hermes Progress Guard — Implementation Plan (Phase 1)
 
-Status: **Phase 1 implemented** (`plugins/progress-guard/`, 37 tests passing).
+Status: **Phase 1 implemented** (`plugins/progress-guard/`, 46 tests passing).
 Author: handoff from prior agent + analysis of actual Hermes source
 
 ## 0. Executive summary
@@ -349,3 +349,28 @@ Resolved during implementation:
 - `transform_tool_result` recovery guidance is best-effort (first-valid-string
   wins in Hermes; another plugin could win the injection). Hard stop is
   unaffected.
+
+### Thinking-loop detection (added after live evaluation)
+
+**Motivation:** during live evaluation a local model entered a pure reasoning
+loop — dozens of verbatim repetitions of one thought — emitting **no tool
+calls**. The tool-only design was blind to it.
+
+**Design:** registers `on_stream_delta` (`kind="reasoning"`). Reasoning text
+is split into segments; `detectors.repeated_thinking` counts the longest
+consecutive run of identical segments. A run ≥ `reasoning_loop.threshold`
+(3) is a single RECOVER-level event: score is raised to `recover_score`,
+recovery guidance is queued (injected into the next executed tool's result),
+and the recovery budget escalates repeated thinking loops to a hard stop.
+State (`reasoning_segments`, `reasoning_flagged`) resets per generation
+(`iteration`).
+
+**Opt-in requirement:** reasoning deltas only reach the hook when Hermes is
+configured with `plugins.stream_reasoning_deltas: true`; without it the
+detector is inert (safe default). This is documented in README and in the
+`ReasoningLoopConfig` docstring.
+
+**Known limitation:** a loop that never ends a generation (streams forever)
+can only be detected and scored; the recovery/hard-stop path attaches to the
+next tool call, so a *fully* silent infinite reasoning stream is only bounded
+by Hermes' own max-output-token cap.

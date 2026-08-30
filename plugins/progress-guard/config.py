@@ -8,6 +8,7 @@ Settings live under ``plugins.entries.progress-guard.settings`` in config.yaml
     identical_result.{enabled, threshold},
     cycle.{enabled, window, max_cycle_length, repetitions},
     repeated_failure.{enabled, threshold},
+    reasoning_loop.{enabled, threshold},
     policy.{warn_score, recover_score, block_score},
     recovery.max_attempts,
     normalization.ignored_fields
@@ -111,6 +112,28 @@ class RepeatedFailureConfig:
 
 
 @dataclass
+class ReasoningLoopConfig:
+    """Repeated identical reasoning segments while the LLM streams thinking.
+
+    Catches pure thinking loops that emit no tool calls. Requires the global
+    Hermes opt-in ``plugins.stream_reasoning_deltas: true`` for reasoning
+    deltas to reach ``on_stream_delta`` at all; without it this detector is
+    inert (safe default).
+    """
+
+    enabled: bool = True
+    threshold: int = 3
+
+    @classmethod
+    def from_mapping(cls, m: Any) -> "ReasoningLoopConfig":
+        m = m if isinstance(m, dict) else {}
+        return cls(
+            enabled=_as_bool(m.get("enabled"), True),
+            threshold=_as_int(m.get("threshold"), 3),
+        )
+
+
+@dataclass
 class PolicyConfig:
     warn_score: int = 3
     recover_score: int = 5
@@ -147,6 +170,7 @@ class ProgressGuardConfig:
     identical_result: IdenticalResultConfig = field(default_factory=IdenticalResultConfig)
     cycle: CycleConfig = field(default_factory=CycleConfig)
     repeated_failure: RepeatedFailureConfig = field(default_factory=RepeatedFailureConfig)
+    reasoning_loop: ReasoningLoopConfig = field(default_factory=ReasoningLoopConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     ignored_fields: tuple = field(default_factory=lambda: DEFAULT_IGNORED_FIELDS)
@@ -162,6 +186,7 @@ class ProgressGuardConfig:
             identical_result=IdenticalResultConfig.from_mapping(m.get("identical_result")),
             cycle=CycleConfig.from_mapping(m.get("cycle")),
             repeated_failure=RepeatedFailureConfig.from_mapping(m.get("repeated_failure")),
+            reasoning_loop=ReasoningLoopConfig.from_mapping(m.get("reasoning_loop")),
             policy=PolicyConfig.from_mapping(m.get("policy")),
             recovery=RecoveryConfig.from_mapping(m.get("recovery")),
             ignored_fields=_as_str_tuple(
@@ -193,6 +218,10 @@ class ProgressGuardConfig:
             },
             "repeated_failure": {
                 k: get(f"repeated_failure.{k}", None)
+                for k in ("enabled", "threshold")
+            },
+            "reasoning_loop": {
+                k: get(f"reasoning_loop.{k}", None)
                 for k in ("enabled", "threshold")
             },
             "policy": {

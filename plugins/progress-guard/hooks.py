@@ -6,6 +6,9 @@
                             the model sees next (only fires for executed calls)
     pre_tool_call           block the next call when the score is past the
                             block threshold or the recovery budget is exhausted
+    on_stream_delta         watch kind="reasoning" deltas for pure thinking
+                            loops (identical repeated segments) that emit no
+                            tool calls; feeds the same score machinery
     on_session_end/reset    drop per-(session, turn) state
 
 Blocking uses Hermes' official ``{"action": "block", "message": ...}``
@@ -20,12 +23,17 @@ from typing import Any, Dict, Optional
 from .config import ProgressGuardConfig
 from .debug import debug_line
 from .detectors import evaluate as detector_signals
+from .detectors import repeated_thinking
 from .events import ToolEvent
 from .fingerprint import action_fingerprint, result_fingerprint
 from .metrics import Metrics
 from .normalize import error_class, normalize_args, normalize_result
 from .policy import decide, score_delta
-from .recovery import hard_stop_message, recovery_message
+from .recovery import (
+    hard_stop_message,
+    recovery_message,
+    thinking_recovery_message,
+)
 from .state import StateRegistry
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,7 @@ class ProgressGuard:
         ctx.register_hook("pre_tool_call", self.on_pre_tool_call)
         ctx.register_hook("post_tool_call", self.on_post_tool_call)
         ctx.register_hook("transform_tool_result", self.on_transform_tool_result)
+        ctx.register_hook("on_stream_delta", self.on_stream_delta)
         ctx.register_hook("on_session_end", self.on_session_end)
         ctx.register_hook("on_session_reset", self.on_session_reset)
 
@@ -150,6 +159,63 @@ class ProgressGuard:
             session_id, turn_id,
         )
 
+    # -- thinking loop detection -------------------------------------------
+
+    def on_stream_delta(
+        self,
+        delta: str = "",
+        kind: str = "",
+        session_id: str = "",
+        turn_id: str = "",
+        iteration: Any = None,
+        **_: Any,
+    ) -> None:
+        """Watch reasoning deltas for a pure thinking loop (no tool calls).
+
+        Requires Hermes' global ``plugins.stream_reasoning_deltas: true``
+        opt-in; without it this hook never sees reasoning text and is inert.
+        """
+        rl = self.cfg.reasoning_loop
+        if not self.cfg.enabled or not rl.enabled or not delta or kind != "reasoning":
+            return
+        state = self.registry.get(session_id, turn_id)
+        it = str(iteration) if iteration is not None else None
+        if it != state.last_iteration:
+            # new generation -> fresh reasoning stream
+            state.reasoning_segments.clear()
+            state.reasoning_tail = ""
+            state.reasoning_run = 0
+            state.reasoning_flagged = False
+            state.last_iteration = it
+
+        state.reasoning_tail += delta
+        while "\n" in state.reasoning_tail:
+            line, state.reasoning_tail = state.reasoning_tail.split("\n", 1)
+            if line.strip():
+                state.reasoning_segments.append(line)
+
+        run = repeated_thinking(list(state.reasoning_segments), rl.threshold)
+        if run >= rl.threshold and not state.reasoning_flagged:
+            state.reasoning_flagged = True
+            state.reasoning_run = run
+            # A thinking loop is one RECOVER-level event, not a compounding
+            # score: flag it, inject guidance once, and let the recovery
+            # budget escalate to a hard stop if it keeps recurring.
+            self.metrics.inc("thinking_loops")
+            state.stall_score = max(state.stall_score, self.cfg.policy.recover_score)
+            decision = decide(state.stall_score, self.cfg)
+            if decision == "RECOVER":
+                state.recovery_count += 1
+                if state.recovery_count > self.cfg.recovery.max_attempts:
+                    state.hard_stop = True
+                    decision = "BLOCK"
+                else:
+                    state.pending_thinking_recovery = True
+            debug_line(
+                self.cfg, "reasoning", {"thinking_repeat": run},
+                state.stall_score, decision, session_id, turn_id,
+            )
+
     # -- recovery injection ------------------------------------------------
 
     def on_transform_tool_result(
@@ -164,6 +230,9 @@ class ProgressGuard:
         if not self.cfg.enabled or not isinstance(result, str):
             return None
         state = self.registry.get(session_id, turn_id)
+        if state.pending_thinking_recovery:
+            state.pending_thinking_recovery = False
+            return result + "\n\n" + thinking_recovery_message()
         if not state.pending_recovery:
             return None
         if tool_call_id and tool_call_id != state.pending_recovery:
