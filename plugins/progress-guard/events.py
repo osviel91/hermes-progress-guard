@@ -22,3 +22,4 @@ class ToolEvent:
     is_poll: bool
     tool_call_id: str = ""
     timestamp: float = 0.0
+    failure_sig: Optional[str] = None

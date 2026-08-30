@@ -81,14 +81,23 @@ def cycle(events: Sequence[ToolEvent], cfg: Any) -> bool:
 
 
 def repeated_failure(events: Sequence[ToolEvent], cfg: Any) -> int:
-    """Max count of events sharing the same (tool, error_class)."""
+    """Max count of events sharing the same failure signature.
+
+    ``failure_sig`` (set on the event) folds in a de-noised excerpt of the
+    actual result when Hermes only provides a generic error message, so
+    genuinely different failures don't merge into one class. Falls back to
+    ``error_class`` when the sig wasn't computed.
+    """
     if not cfg.enabled:
         return 0
     counts = defaultdict(int)
     for e in events:
-        if e.status != "error" or not e.error_class:
+        if e.status != "error":
             continue
-        counts[(e.tool_name, e.error_class)] += 1
+        key = (e.tool_name, e.failure_sig or e.error_class or "")
+        if not key[1]:
+            continue
+        counts[key] += 1
     return max(counts.values(), default=0)
 
 

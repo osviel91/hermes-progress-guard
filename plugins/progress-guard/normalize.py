@@ -60,5 +60,42 @@ def error_class(error_type: Optional[str], error_message: Optional[str]) -> str:
     if not error_type and not error_message:
         return ""
     et = (error_type or "").strip().lower()
-    em = _ERR_NOISE.sub("N", (error_message or "").strip().lower())
-    return f"{et}|{em[:160]}"
+    em = _denoise(error_message or "")
+    return f"{et}|{em}"
+
+
+# Hermes collapses most tool failures to error_type='tool_error' with a generic
+# message like 'Script exited with code 1' (code_execution_tool.py:1430) — the
+# informative content is only in the tool *result*. When the message matches
+# one of these, fall back to the de-noised result output instead.
+_GENERIC_ERROR_MSG = re.compile(
+    r"^(tool error|command failed|script exited with code\s*\d+|"
+    r"exit code\s*\d+|process.*(?:exited|returned).*code\s*\d+|"
+    r"the tool (?:failed|returned an error)|error (?:executing|running) (?:the )?(?:tool|command)|"
+    r"non-?zero exit|tool execution failed)"
+)
+
+
+def _denoise(text: str, limit: int = 160) -> str:
+    """Lowercase + strip volatile noise (line numbers, hex, paths, ids)."""
+    return _ERR_NOISE.sub("N", (text or "").strip().lower())[:limit]
+
+
+def failure_signature(
+    error_type: Optional[str], error_message: Optional[str], result_text: str
+) -> str:
+    """Failure class that also separates genuinely different failures.
+
+    When Hermes gives us a generic error_message, the distinguishing content
+    lives in the tool result — a de-noised snippet of it is folded in so that
+    e.g. four different inspection scripts with 'Script exited with code 1'
+    do not merge into one 'repeated failure', while patch(A)/patch(B) with
+    'context mismatch at line N' still collapse to the same class.
+    """
+    et = (error_type or "").strip().lower()
+    msg = (error_message or "").strip()
+    if not msg or _GENERIC_ERROR_MSG.match(msg.lower()):
+        preview = _denoise(result_text or "")
+        if preview:
+            msg = preview
+    return f"{et}|{_denoise(msg)}"

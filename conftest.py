@@ -153,13 +153,17 @@ def ev():
         # default ignored fields for fingerprinting parity with the guard
         ignored = ("timestamp", "request_id", "trace_id")
         afp = fingerprint.action_fingerprint(tool, normalize.normalize_args(args, ignored))
-        rfp = fingerprint.result_fingerprint(normalize.normalize_result(result))
+        norm_result = normalize.normalize_result(result)
+        rfp = fingerprint.result_fingerprint(norm_result)
         return ToolEvent(
             tool_name=tool,
             args_fingerprint=afp,
             result_fingerprint=rfp,
             status=status,
             error_class=normalize.error_class(error_type, error_message)
+            if status == "error"
+            else None,
+            failure_sig=normalize.failure_signature(error_type, error_message, norm_result)
             if status == "error"
             else None,
             is_mutation=is_mutation,

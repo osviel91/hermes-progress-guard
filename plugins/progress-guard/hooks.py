@@ -27,7 +27,7 @@ from .detectors import repeated_thinking
 from .events import ToolEvent
 from .fingerprint import action_fingerprint, result_fingerprint
 from .metrics import Metrics
-from .normalize import error_class, normalize_args, normalize_result
+from .normalize import error_class, failure_signature, normalize_args, normalize_result
 from .policy import decide, score_delta
 from .recovery import (
     hard_stop_message,
@@ -119,7 +119,8 @@ class ProgressGuard:
 
         try:
             afp = action_fingerprint(tool_name, normalize_args(args, self.cfg.ignored_fields))
-            rfp = result_fingerprint(normalize_result(result))
+            norm_result = normalize_result(result)
+            rfp = result_fingerprint(norm_result)
         except Exception:
             return  # never let a fingerprinting bug take down the agent
 
@@ -130,6 +131,9 @@ class ProgressGuard:
             result_fingerprint=rfp,
             status=status or "ok",
             error_class=error_class(error_type, error_message) if status == "error" else None,
+            failure_sig=failure_signature(error_type, error_message, norm_result)
+            if status == "error"
+            else None,
             is_mutation=is_mutation,
             is_poll=is_poll,
             tool_call_id=tool_call_id or "",

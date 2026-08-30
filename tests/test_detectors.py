@@ -132,6 +132,53 @@ def test_repeated_failure_ignores_successes(ev):
     assert _run(detectors.repeated_failure, events) == 0
 
 
+def test_repeated_failure_generic_message_distinguishes_by_output(ev):
+    # Hermes gives ALL terminal failures error_type='tool_error' +
+    # 'Script exited with code 1'; the distinguishing content is in the result.
+    # 4 genuinely different inspection scripts must NOT merge (regression for
+    # the 20260830_202815_106de3 false positive).
+    events = [
+        ev("terminal", {"cmd": "py script1.py"}, "FILE | ARTIST | TITLE | ALBUM | TRACK | YEAR | GENRE",
+           status="error", error_type="tool_error", error_message="Script exited with code 1"),
+        ev("terminal", {"cmd": "py script2.py"}, "FILE | ARTIST | TITLE | TRACK | YEAR | nonascii#",
+           status="error", error_type="tool_error", error_message="Script exited with code 1"),
+        ev("terminal", {"cmd": "py script3.py"}, "Traceback: KeyError at line 12 in mapper",
+           status="error", error_type="tool_error", error_message="Script exited with code 1"),
+        ev("terminal", {"cmd": "py script4.py"}, "FILE | ARTIST | TITLE | TRACK | YEAR | DUR/BIT",
+           status="error", error_type="tool_error", error_message="Script exited with code 1"),
+    ]
+    assert _run(detectors.repeated_failure, events) == 1
+
+
+def test_repeated_failure_generic_message_same_output_groups(ev):
+    # identical failure output (e.g. same cd typo twice) still groups
+    events = [
+        ev("terminal", {"cmd": "cd /Volumes/personal_folder/Music/Dake Academia"},
+           "no such file or directory", status="error",
+           error_type="tool_error", error_message="Script exited with code 1"),
+        ev("terminal", {"cmd": "cd /Volumes/personal_folder/Music/Dake Academia"},
+           "no such file or directory", status="error",
+           error_type="tool_error", error_message="Script exited with code 1"),
+        ev("terminal", {"cmd": "cd /Volumes/personal_folder/Music/Dake Academia"},
+           "no such file or directory", status="error",
+           error_type="tool_error", error_message="Script exited with code 1"),
+    ]
+    assert _run(detectors.repeated_failure, events) == 3
+
+
+def test_repeated_failure_line_number_noise_ignored(ev):
+    # patch(A)/patch(B) 'context mismatch at line N' still collapse (handoff §10.4)
+    events = [
+        ev("patch", {"f": "a"}, "context mismatch at line 3",
+           status="error", error_type="PatchError", error_message="context mismatch at line 3"),
+        ev("patch", {"f": "b"}, "context mismatch at line 8",
+           status="error", error_type="PatchError", error_message="context mismatch at line 8"),
+        ev("patch", {"f": "c"}, "context mismatch at line 12",
+           status="error", error_type="PatchError", error_message="context mismatch at line 12"),
+    ]
+    assert _run(detectors.repeated_failure, events) == 3
+
+
 def test_repeated_thinking_consecutive_identical(ev):
     segs = ["same thought", "same thought", "same thought"]
     assert detectors.repeated_thinking(segs, 3) == 3
