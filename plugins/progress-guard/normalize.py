@@ -94,7 +94,7 @@ def failure_signature(
     """
     et = (error_type or "").strip().lower()
     msg = (error_message or "").strip()
-    if not msg or _GENERIC_ERROR_MSG.match(msg.lower()):
+    if not msg or msg.lower() in {"none", "null"} or _GENERIC_ERROR_MSG.match(msg.lower()):
         preview = _denoise(result_text or "")
         if preview:
             msg = preview

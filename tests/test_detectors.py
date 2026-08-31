@@ -152,6 +152,29 @@ def test_repeated_failure_ignores_successes(ev):
     assert _run(detectors.repeated_failure, events) == 0
 
 
+def test_repeated_failure_none_message_distinguishes_by_output(ev):
+    # Hermes reports terminal failures with error_message="None"; different
+    # outputs must not merge into one failure class.
+    events = [
+        ev("terminal", {"c": "yt-dlp --version"}, status="error", error_type="tool_error", error_message="None", result="yt-dlp: command not found"),
+        ev("terminal", {"c": "run 1"}, status="error", error_type="tool_error", error_message="None", result="[Command timed out after 180s]"),
+        ev("terminal", {"c": "run 2"}, status="error", error_type="tool_error", error_message="None", result="[Command timed out after 180s]"),
+        ev("terminal", {"c": "mid3cp"}, status="error", error_type="tool_error", error_message="None", result="mid3cp: warning: uv bin not in PATH"),
+        ev("terminal", {"c": "run 3"}, status="error", error_type="tool_error", error_message="None", result="Traceback NameError: ALBUM at line 4"),
+        ev("terminal", {"c": "run 4"}, status="error", error_type="tool_error", error_message="None", result="cleaned. album now:"),
+    ]
+    assert _run(detectors.repeated_failure, events) == 2  # only the 2 identical timeouts merge
+
+
+def test_repeated_failure_none_message_same_output_groups(ev):
+    events = [
+        ev("terminal", {"c": "x"}, status="error", error_type="tool_error", error_message="None", result="No such file or directory"),
+        ev("terminal", {"c": "y"}, status="error", error_type="tool_error", error_message="None", result="No such file or directory"),
+        ev("terminal", {"c": "z"}, status="error", error_type="tool_error", error_message="None", result="No such file or directory"),
+    ]
+    assert _run(detectors.repeated_failure, events) == 3
+
+
 def test_repeated_failure_generic_message_distinguishes_by_output(ev):
     # Hermes gives ALL terminal failures error_type='tool_error' +
     # 'Script exited with code 1'; the distinguishing content is in the result.
