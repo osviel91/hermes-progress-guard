@@ -99,10 +99,11 @@ def test_compactor_first_loses_recovery_message(make_guard):
 
 def test_hard_stop_independent_of_transform_ordering(make_guard):
     # hard-stop enforcement happens in pre_tool_call (before transform hooks),
-    # so transform ordering can never mute a block.
+    # so transform ordering can never mute a block. The recovery budget (2)
+    # is granted first; the 13th identical read escalates to the hard stop.
     ctx, guard = make_guard()
-    for i in range(5):
-        _read(ctx, guard, i)  # 5th identical read escalates past block
+    for i in range(13):
+        _read(ctx, guard, i)
     pre = ctx.hooks["pre_tool_call"](
         tool_name="write_file", session_id="s1", turn_id="t1",
     )

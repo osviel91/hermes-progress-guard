@@ -21,15 +21,18 @@ from .events import ToolEvent
 
 
 def exact_repeat(events: Sequence[ToolEvent], cfg: Any) -> int:
-    """Longest consecutive run of identical (tool, args_fingerprint).
+    """Length of the identical (tool, args_fingerprint) run ending at the tail.
 
-    Poll tools (``process_manage``, ``*_poll``, ``*_get_result``) are exempt:
-    they are legitimately re-invoked with identical args, so a poll between
-    calls breaks the run instead of counting toward it (handoff §15).
+    Only the run the *current* event is part of counts: an old burst of
+    duplicates that stopped being extended must not keep poisoning later
+    material progress (a real-session over-block seen in evaluation). Poll
+    tools (``process_manage``, ``*_poll``, ``*_get_result``) are exempt:
+    legitimately re-invoked with identical args, a poll between calls breaks
+    the run instead of counting toward it (handoff §15).
     """
     if not cfg.enabled:
         return 0
-    best, run, prev = 0, 0, None
+    run, prev = 0, None
     for e in events:
         if e.is_poll:
             run, prev = 0, None
@@ -37,9 +40,7 @@ def exact_repeat(events: Sequence[ToolEvent], cfg: Any) -> int:
         key = (e.tool_name, e.args_fingerprint)
         run = run + 1 if key == prev else 1
         prev = key
-        if run > best:
-            best = run
-    return best
+    return run
 
 
 def identical_result(events: Sequence[ToolEvent], cfg: Any) -> int:

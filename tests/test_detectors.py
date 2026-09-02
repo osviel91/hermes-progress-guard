@@ -35,12 +35,17 @@ def test_exact_repeat_no_false_positive_abc(ev):
     assert _run(detectors.exact_repeat, events) == 1
 
 
-def test_exact_repeat_max_run_across_break(ev):
+def test_exact_repeat_tail_run_breaks_at_interruption(ev):
+    # An old duplicate burst that stopped being extended must not keep firing
+    # on later events (real-session over-block regression). Only the run the
+    # current event is part of counts.
     events = [
         ev("a", {"q": 1}, "r"), ev("a", {"q": 1}, "r"), ev("b", {"q": 1}, "r"),
         ev("a", {"q": 1}, "r"),
     ]
-    assert _run(detectors.exact_repeat, events) == 2
+    assert _run(detectors.exact_repeat, events) == 1
+    # ...while an uninterrupted run still escalates to the full length
+    assert _run(detectors.exact_repeat, [ev("a", {"q": 1}, "r")] * 4) == 4
 
 
 def test_identical_result_detects_stagnant_search(ev):

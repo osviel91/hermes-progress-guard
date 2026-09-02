@@ -66,17 +66,26 @@ def score_delta(
         if cfg.family_cycle.enabled and signals["family_cycle"] >= 2:
             delta += 2
         # steps-since-material-progress amplifies only existing detector
-        # evidence (handoff §10): never fires recovery by itself, and never
-        # while a structural tool/family cycle is already escalating (those
-        # reach BLOCK on their own and must not skip the guided RECOVER
-        # stage). It adds value when novelty-only evidence (identical_result,
-        # repeated_failure) persists without a clear periodic pattern.
-        sc = cfg.steps
+        # evidence (handoff §10): never fires recovery by itself. It applies
+        # solely to spread evidence (identical_result: different actions, same
+        # result) where a slow signal benefits from a nudge. Tight repeat runs
+        # (exact_repeat), consecutive failing runs (repeated_failure) and
+        # structural cycles (cycle/family_cycle) already escalate on every
+        # event of the loop; a per-event +1 there skews the band edges (a WARN
+        # 3 pushed to 4 makes the next run jump 4 -> 8 and skip the guided
+        # RECOVER stage), so the bonus is excluded while they fire.
+        ir_firing = ir.enabled and signals["identical_result"] >= ir.threshold
+        rf_firing = rf.enabled and signals["repeated_failure"] >= rf.threshold
+        er_any = er.enabled and signals["exact_repeat"] >= er.threshold
         cycle_active = (cfg.cycle.enabled and signals["cycle"]) or (
             cfg.family_cycle.enabled and signals["family_cycle"] >= 2
         )
+        sc = cfg.steps
         if (
             sc.enabled
+            and ir_firing
+            and not er_any
+            and not rf_firing
             and not cycle_active
             and steps_since_material_progress is not None
             and steps_since_material_progress >= sc.bonus_threshold

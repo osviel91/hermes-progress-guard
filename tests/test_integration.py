@@ -37,31 +37,39 @@ def _blocks(records):
 
 
 def test_scenario_a_exact_loop_detected_and_blocked(drive):
-    script = [ok("read_file", {"path": "/a"}, "same-content") for _ in range(6)]
+    # A pure identical loop: recovery is granted twice (budget), a third
+    # persistence of the same loop escalates to a hard stop. 13 identical
+    # reads reach the third recurrence on the final event.
+    script = [ok("read_file", {"path": "/a"}, "same-content") for _ in range(13)]
     ctx, guard, records = drive(script)
 
     injects = _injections(records)
     blocks = _blocks(records)
-    assert len(injects) == 1  # one guided recovery before the hard stop
+    assert len(injects) == 2  # two guided recoveries before the hard stop
     assert len(blocks) == 1
     assert HARD_STOP_MARKER in blocks[0]
-    assert guard.metrics.snapshot().get("recoveries_triggered", 0) == 1
+    assert guard.metrics.snapshot().get("recoveries_triggered", 0) == 2
+    assert guard.metrics.snapshot().get("hard_stops", 0) == 1
     assert guard.metrics.snapshot().get("exact_repeats", 0) >= 1
 
 
 def test_scenario_b_alternating_loop_cycle_detected(drive):
+    # Alternating loop A/B: recoveries at the 6th and 12th events, the third
+    # recurrence (18th) escalates to a hard stop; a trailing call gets blocked.
     script = []
-    for i in range(4):
+    for i in range(9):
         script.append(ok("A", {"i": i}, f"r{i}a"))
         script.append(ok("B", {"i": i}, f"r{i}b"))
+    script.append(ok("A", {"i": 99}, "stray"))
     ctx, guard, records = drive(script)
 
     injects = _injections(records)
     blocks = _blocks(records)
-    assert len(injects) == 1
+    assert len(injects) == 2
     assert len(blocks) == 1
     assert HARD_STOP_MARKER in blocks[0]
     assert guard.metrics.snapshot().get("cycles_detected", 0) >= 1
+    assert guard.metrics.snapshot().get("hard_stops", 0) == 1
 
 
 def test_scenario_c_legitimate_polling_continues(drive):
@@ -312,6 +320,31 @@ def test_mutation_success_does_not_imply_progress(drive):
     assert m.get("material_progress_events", 0) >= 1  # the landed patch counted
 
 
+def test_recovery_then_strategy_change_not_re_blocked(drive):
+    # Real CLI session 20260902_234056_c5cebd regression: identical terminal
+    # misuse errors triggered recovery guidance, the model THEN changed
+    # strategy (background=true, pytest green) and did real work. The recovery
+    # checkpoint must reset the detector window so post-recovery work is never
+    # hard-blocked by pre-recovery evidence (second over-block mechanism).
+    script = (
+        [ok("terminal", {"command": "git status"}, "clean")]
+        + [err("terminal", {"command": "notify x"},
+               "tool_error", "notify must be true/false") for _ in range(5)]
+        + [ok("terminal", {"command": "sleep 3", "background": True},
+              '{"pid": 47717, "status": "running"}'),
+           ok("terminal", {"command": "pytest"}, '{"exit_code": 0, "passed": 109}'),
+           ok("terminal", {"command": "ps aux"}, "no matching process")]
+    )
+    ctx, guard, records = drive(script)
+
+    assert len(_injections(records)) == 1  # one guided recovery, delivered
+    assert _blocks(records) == []          # strategy change keeps working
+    m = guard.metrics.snapshot()
+    assert m.get("recoveries_triggered", 0) == 1
+    assert m.get("repeated_failures", 0) >= 1
+    assert guard.registry.get("s1", "t1").stall_score < 5
+
+
 def test_iterative_progress_never_false_stalls(drive):
     # patch -> tests improve -> patch -> tests pass: real progress, no stall
     # (handoff §24 "landed-mutation-with-progress")
@@ -369,16 +402,17 @@ def test_legitimate_polling_counts_material_progress(drive):
 
 
 def test_hard_stop_ignored_counts_post_block_calls(drive):
-    # model keeps issuing tools after the hard-stop message -> metric climbs
-    script = [ok("read_file", {"path": "/a"}, "same") for _ in range(8)]
+    # Model keeps issuing tools after each recovery message and even after the
+    # hard-stop block -> post-block attempts are counted as evidence.
+    script = [ok("read_file", {"path": "/a"}, "same") for _ in range(15)]
     ctx, guard, records = drive(script)
 
     blocks = _blocks(records)
-    assert len(blocks) >= 2
+    assert len(blocks) == 3  # the 13th, 14th and 15th calls hit the hard stop
     assert all(HARD_STOP_MARKER in b for b in blocks)
     m = guard.metrics.snapshot()
     assert m.get("hard_stops", 0) == 1
-    assert m.get("blocked_calls_after_hard_stop", 0) >= 1
+    assert m.get("blocked_calls_after_hard_stop", 0) == 2
 
 
 def test_session_carryover_folds_and_cleans(drive):
@@ -405,3 +439,45 @@ def test_session_carryover_folds_and_cleans(drive):
     ctx.hooks["on_session_finalize"](session_id="sx")
     assert guard.registry.size() == 0
     assert guard.registry.session_count() == 0
+
+
+def test_session_finalize_logs_metrics_summary_when_debug(drive, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG, logger="progress-guard")
+    ctx, guard, records = drive(
+        [ok("patch", {"file": "a.py"}, '{"success": true}'),
+         err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 9"),
+         err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 9"),
+         err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 9")],
+        settings={"debug": True},
+        session="sy", turn="t1",
+    )
+    ctx.hooks["on_session_finalize"](session_id="sy", platform="cli")
+    lines = [r.getMessage() for r in caplog.records
+             if "SESSION SUMMARY" in r.getMessage()]
+    assert lines, "no SESSION SUMMARY logged"
+    assert lines[-1].startswith("[progress-guard] SESSION SUMMARY session=sy platform=cli ")
+    assert "material_progress_events=1" in lines[-1]
+    assert "repeated_failures=1" in lines[-1]
+
+
+def test_duplicate_write_burst_does_not_poison_legit_work(drive):
+    # Regression from real-session evaluation (T1): a 3x identical write_file
+    # burst (client re-emission) must not keep firing exact_repeat on later
+    # DISTINCT landed writes; material decay keeps the score low and the
+    # legit workflow runs to completion without injection/block.
+    script = [
+        ok("write_file", {"path": "/s/__main__.py", "content": "cli = 1"}, '{"bytes_written": 5}'),
+        ok("write_file", {"path": "/s/__main__.py", "content": "cli = 1"}, '{"bytes_written": 5}'),
+        ok("write_file", {"path": "/s/__main__.py", "content": "cli = 1"}, '{"bytes_written": 5}'),
+        ok("write_file", {"path": "/s/lib.py", "content": "def top(): ..."}, '{"bytes_written": 7}'),
+        ok("write_file", {"path": "/s/tests.py", "content": "def test_top(): ..."}, '{"bytes_written": 9}'),
+        ok("execute_code", {"code": "run_tests()"}, '{"exit_code": 0, "passed": 3}'),
+    ]
+    ctx, guard, records = drive(script)
+
+    assert _injections(records) == []
+    assert _blocks(records) == []
+    state = guard.registry.get("s1", "t1")
+    assert state.stall_score == 0  # distinct landed writes decayed the burst
+    assert guard.metrics.snapshot().get("material_progress_events", 0) >= 1

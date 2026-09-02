@@ -27,6 +27,11 @@ class TurnState:
         self.pending_recovery: Optional[str] = None
         self.pending_thinking_recovery: bool = False
         self.created_at: float = time.monotonic()
+        # Index (into events) from which detectors may consider evidence.
+        # Advanced past the recovery-triggering event each time a RECOVER
+        # injection is delivered so pre-recovery staleness cannot re-fire and
+        # hard-block a workflow that actually changed strategy afterwards.
+        self.evidence_from_index: int = 0
         # Phase 1.6: material progress / steps since / poll progression.
         self.steps_since_material_progress: int = 0
         self.last_material_progress_index: int = 0

@@ -154,7 +154,7 @@ class ProgressGuard:
             poll_done=cur_done if is_poll and status == "ok" else False,
         )
 
-        events = list(state.events) + [event]
+        events = list(state.events)[state.evidence_from_index:] + [event]
         signals = detector_signals(events, self.cfg)
         steps_since = (
             0 if event.material_progress else state.steps_since_material_progress + 1
@@ -187,6 +187,10 @@ class ProgressGuard:
                 decision = "BLOCK"
             else:
                 state.pending_recovery = tool_call_id or f"{tool_name}:{len(state.events)}"
+                # Fresh window + zeroed score after a delivered recovery: a
+                # strategy change is rewarded, only persistence re-escalates.
+                state.evidence_from_index = len(state.events)
+                state.stall_score = 0
         self._record(signals, decision, tool_name, session_id, turn_id, state,
                      material=event.material_progress)
         debug_line(
@@ -371,6 +375,13 @@ class ProgressGuard:
         # Real session teardown -> drop session trajectory + turns.
         if session_id:
             self.registry.drop_session(session_id)
+        if self.cfg.debug:
+            snapshot = dict(sorted(self.metrics.snapshot().items()))
+            summary = " ".join(f"{k}={v}" for k, v in snapshot.items())
+            logger.warning(
+                "[progress-guard] SESSION SUMMARY session=%s platform=%s %s",
+                session_id or "", platform or "", summary,
+            )
 
     def on_session_reset(self, **_: Any) -> None:
         self.registry.clear()

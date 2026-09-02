@@ -35,8 +35,11 @@ outputs ≠ progressing toward the objective". The core semantic split:
 - **steps_since_material_progress.** Actions since the last material-progress
   event are counted. By itself the counter never triggers recovery
   (exploration must keep working); once the threshold is exceeded it
-  **amplifies detector evidence**, and it is surfaced in metrics, debug lines
-  and recovery messages.
+  **amplifies detector evidence**, but only *spread* evidence (identical
+  stagnant results from different actions) — never on top of a tight
+  `exact_repeat` run, a consecutive failing run or a structural cycle, which
+  already escalate every event. It is surfaced in metrics, debug lines and
+  recovery messages.
 - **Novelty ≠ progress.** A changed result is recorded but does *not* erase
   accumulated stagnation evidence and does *not* decay the stall score.
 - **Canonical (semantic-lite) action keys** collapse jitter
@@ -103,8 +106,12 @@ Environment overrides: `PROGRESS_GUARD_ENABLED`, `PROGRESS_GUARD_DEBUG`,
 2. **RECOVER** injects a guided recovery message into the tool result it is
    attached to. The message names the detected pattern, steps since material
    progress, last known material progress, and which strategy must not be
-   repeated. Recovery budget: `recovery.max_attempts` (default 2), then the
-   escalation becomes a hard stop.
+   repeated. Delivering the message also **resets the detector window and the
+   stall score** (recovery checkpoint), so a model that *follows the guidance*
+   and changes strategy is never hard-blocked by pre-recovery evidence; only
+   persistence of the same loop rebuilds evidence. Recovery budget:
+   `recovery.max_attempts` (default 2) — two guided recoveries, then a third
+   recurrence escalates to a hard stop.
 3. **BLOCK** (via `pre_tool_call`) refuses execution with a hard-stop
    message once the budget is exhausted or `block_score` is reached; later
    attempts keep counting under `blocked_calls_after_hard_stop`.
@@ -154,7 +161,7 @@ Phase-1 metrics kept: `exact_repeats`, `repeated_results`,
 `[progress-guard] tool=… family=… steps_since=… material=… stall_score=…
 decision=…` plus per-detector counters.
 
-### Known limitations (Phase 1.6, documented in the analysis doc)
+### Known limitations
 
 - `steps_since_material_progress` never triggers recovery by itself —
   conservative, favoring false negatives.
