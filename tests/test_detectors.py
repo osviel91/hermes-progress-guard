@@ -12,6 +12,7 @@ _SECTIONS = {
     detectors.exact_repeat: "exact_repeat",
     detectors.identical_result: "identical_result",
     detectors.cycle: "cycle",
+    detectors.family_cycle: "family_cycle",
     detectors.repeated_failure: "repeated_failure",
 }
 
@@ -245,3 +246,77 @@ def test_repeated_thinking_blank_lines_skipped(ev):
     # blank lines are whitespace; identical non-blank segments still count
     segs = ["a", "", "a", "a"]
     assert detectors.repeated_thinking(segs, 3) == 3
+
+
+def test_family_cycle_detects_cross_tool_read_search(ev):
+    # read_file -> grep -> read_file -> search_files is READ/SEARCH at the
+    # intent level even though the concrete tools never repeat (handoff §8)
+    events = [
+        ev("read_file", {"path": "/a"}, "r1"),
+        ev("grep", {"q": "x"}, "r2"),
+        ev("read_file", {"path": "/b"}, "r3"),
+        ev("search_files", {"q": "x"}, "r4"),
+        ev("read_file", {"path": "/c"}, "r5"),
+        ev("grep", {"q": "y"}, "r6"),
+    ]
+    assert _run(detectors.family_cycle, events) == 2  # READ SEARCH READ SEARCH
+
+
+def test_family_cycle_not_fired_for_single_family(ev):
+    events = [
+        ev("read_file", {"path": "/a"}, "r1"),
+        ev("read_file", {"path": "/b"}, "r2"),
+        ev("read_file", {"path": "/c"}, "r3"),
+        ev("read_file", {"path": "/d"}, "r4"),
+    ]
+    assert _run(detectors.family_cycle, events) == 0
+
+
+def test_family_cycle_ignores_mutation_period(ev):
+    # a mutating tool inside the period means iterative development, not a loop
+    events = [
+        ev("read_file", {"path": "/a"}, "r1"),
+        ev("write_file", {"path": "/x"}, '{"bytes_written": 3}', is_mutation=True),
+        ev("read_file", {"path": "/a"}, "r2"),
+        ev("write_file", {"path": "/y"}, '{"bytes_written": 3}', is_mutation=True),
+    ]
+    assert _run(detectors.family_cycle, events) == 0
+
+
+def test_tool_cycle_still_detected_alongside_family(ev):
+    # the exact tool-name detector is kept, not replaced by the family one
+    events = [
+        ev("A", {}, "r1"), ev("B", {}, "r2"),
+        ev("A", {}, "r3"), ev("B", {}, "r4"),
+    ]
+    assert _run(detectors.cycle, events) is True
+    assert _run(detectors.family_cycle, events) in (0, 2)  # A/B both OTHER
+
+
+def test_reasoning_cycle_detects_abab():
+    segs = ["why is this failing", "check the path", "why is this failing", "check the path"]
+    assert detectors.reasoning_cycle(segs, 2, 3) == 2
+
+
+def test_reasoning_cycle_detects_abcabc():
+    segs = [
+        "step one", "step two", "step three",
+        "step one", "step two", "step three",
+    ]
+    assert detectors.reasoning_cycle(segs, 2, 3) == 3
+
+
+def test_reasoning_cycle_ignores_diverse():
+    segs = ["a", "b", "c", "d", "e", "f"]
+    assert detectors.reasoning_cycle(segs, 2, 3) == 0
+
+
+def test_reasoning_cycle_ignores_single_distinct():
+    # pure repeats are repeated_thinking's job, not a cycle
+    segs = ["same", "same", "same", "same"]
+    assert detectors.reasoning_cycle(segs, 2, 3) == 0
+
+
+def test_reasoning_normalization_is_cheap():
+    assert detectors.normalize_segment("  A\nB   ") == "a b"
+    assert detectors.normalize_segment("Done!") == "done!"

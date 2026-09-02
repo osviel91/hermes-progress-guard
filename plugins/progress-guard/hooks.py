@@ -1,18 +1,21 @@
-"""Hook wiring for Progress Guard (handoff §13).
+"""Hook wiring for Progress Guard (handoff §13, §17, §18).
 
-    post_tool_call          record event -> normalize -> fingerprint -> update
-                            detectors -> compute score -> decide
+    post_tool_call          record event -> normalize -> fingerprint -> family
+                            -> canonical key -> material-progress assessment
+                            (raw result) -> update detectors -> score -> decide
     transform_tool_result   inject recovery/replan guidance into the result
                             the model sees next (only fires for executed calls)
-    pre_tool_call           block the next call when the score is past the
-                            block threshold or the recovery budget is exhausted
+    pre_tool_call           block when the score is past the block threshold or
+                            the recovery budget is exhausted; counts post-block
+                            attempts
     on_stream_delta         watch kind="reasoning" deltas for pure thinking
-                            loops (identical repeated segments) that emit no
-                            tool calls; feeds the same score machinery
-    on_session_end/reset    drop per-(session, turn) state
+                            loops (identical repeats and ABAB/ABCABC cycles)
+    on_session_start        brand-new session -> clean SessionTrajectory
+    on_session_end          per-turn -> fold compact carryover, drop the turn
+    on_session_finalize/reset  real session teardown -> drop session state
 
-Blocking uses Hermes' official ``{"action": "block", "message": ...}``
-contract; the message reaches the model as a synthetic error result.
+Material progress is always assessed on the *raw* post_tool_call result, i.e.
+before tool-output-compactor could transform anything (handoff §19).
 """
 
 from __future__ import annotations
@@ -20,16 +23,23 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from . import hermes_compat as compat
+from .canonical import canonical_action
 from .config import ProgressGuardConfig
 from .debug import debug_line
 from .detectors import evaluate as detector_signals
-from .detectors import repeated_thinking
+from .detectors import reasoning_cycle, repeated_thinking
 from .events import ToolEvent
+from .families import classify_action
 from .fingerprint import action_fingerprint, result_fingerprint
+from .material_progress import MaterialProgress
+from .material_progress import assess as assess_material
+from .material_progress import poll_state
 from .metrics import Metrics
 from .normalize import error_class, failure_signature, normalize_args, normalize_result
 from .policy import decide, score_delta
 from .recovery import (
+    family_trail,
     hard_stop_message,
     recovery_message,
     thinking_recovery_message,
@@ -37,38 +47,6 @@ from .recovery import (
 from .state import StateRegistry
 
 logger = logging.getLogger(__name__)
-
-try:  # authoritative classification lives in Hermes core
-    from agent.tool_guardrails import (  # type: ignore
-        IDEMPOTENT_TOOL_NAMES,
-        MUTATING_TOOL_NAMES,
-        is_stall_guard_repeatable,
-    )
-except Exception:  # standalone / test environment
-    # ponytail: minimal fallback so the plugin also works outside Hermes;
-    # Hermes' own lists are authoritative when it runs under Hermes.
-    IDEMPOTENT_TOOL_NAMES = frozenset(
-        {
-            "read_file", "search_files", "web_search", "web_extract",
-            "session_search", "browser_snapshot", "browser_console",
-            "mcp_filesystem_read_file",
-        }
-    )
-    MUTATING_TOOL_NAMES = frozenset(
-        {
-            "terminal", "execute_code", "write_file", "patch", "todo",
-            "memory", "skill_manage", "browser_click", "browser_type",
-            "browser_press", "browser_scroll", "browser_navigate",
-            "send_message", "cronjob", "delegate_task", "process",
-        }
-    )
-    _STALL_GUARD_REPEATABLE_TOOLS = frozenset({"process"})
-    _POLL_SUFFIXES = ("_get_result", "_poll")
-
-    def is_stall_guard_repeatable(tool_name: str) -> bool:
-        if tool_name in _STALL_GUARD_REPEATABLE_TOOLS:
-            return True
-        return tool_name.endswith(_POLL_SUFFIXES)
 
 
 class ProgressGuard:
@@ -83,15 +61,17 @@ class ProgressGuard:
         ctx.register_hook("post_tool_call", self.on_post_tool_call)
         ctx.register_hook("transform_tool_result", self.on_transform_tool_result)
         ctx.register_hook("on_stream_delta", self.on_stream_delta)
+        ctx.register_hook("on_session_start", self.on_session_start)
         ctx.register_hook("on_session_end", self.on_session_end)
+        ctx.register_hook("on_session_finalize", self.on_session_finalize)
         ctx.register_hook("on_session_reset", self.on_session_reset)
 
     # -- classification ----------------------------------------------------
 
     def _classify(self, tool_name: str) -> tuple:
         return (
-            tool_name in MUTATING_TOOL_NAMES,
-            is_stall_guard_repeatable(tool_name),
+            tool_name in compat.MUTATING_TOOL_NAMES,
+            compat.is_stall_guard_repeatable(tool_name),
         )
 
     # -- record + score ----------------------------------------------------
@@ -125,6 +105,34 @@ class ProgressGuard:
             return  # never let a fingerprinting bug take down the agent
 
         is_mutation, is_poll = self._classify(tool_name)
+        family = classify_action(tool_name, args)
+        canonical = (
+            canonical_action(tool_name, family, args) if self.cfg.canonical.enabled else ""
+        )
+
+        # Material-progress assessment on the RAW result (before any compactor).
+        raw_result = result if isinstance(result, str) else norm_result
+        landed = (
+            compat.file_mutation_result_landed(tool_name, raw_result)
+            if self.cfg.material_progress.enabled
+            else False
+        )
+        cur_pct, cur_done = (None, False)
+        if family == "POLL" and status == "ok":
+            cur_pct, cur_done = poll_state(raw_result)
+        mp = MaterialProgress()
+        if self.cfg.material_progress.enabled:
+            mp = assess_material(
+                tool_name=tool_name,
+                result=raw_result,
+                status=status or "ok",
+                family=family,
+                is_mutation=is_mutation,
+                prev_poll_pct=state.last_poll_pct,
+                prev_poll_done=state.last_poll_done,
+                mutation_landed=landed,
+            )
+
         event = ToolEvent(
             tool_name=tool_name,
             args_fingerprint=afp,
@@ -137,17 +145,39 @@ class ProgressGuard:
             is_mutation=is_mutation,
             is_poll=is_poll,
             tool_call_id=tool_call_id or "",
+            family=family,
+            canonical_action=canonical,
+            mutation_landed=landed,
+            material_progress=mp.occurred,
+            progress_reason=mp.reason,
+            poll_pct=cur_pct if is_poll and status == "ok" else None,
+            poll_done=cur_done if is_poll and status == "ok" else False,
         )
 
         events = list(state.events) + [event]
         signals = detector_signals(events, self.cfg)
+        steps_since = (
+            0 if event.material_progress else state.steps_since_material_progress + 1
+        )
         delta = score_delta(
             signals, self.cfg, event=event,
-            prev_result_fingerprint=state.last_result_fingerprint,
+            steps_since_material_progress=steps_since,
         )
         state.stall_score = max(0, state.stall_score + delta)
         state.push(event)
         state.last_result_fingerprint = rfp
+        if event.material_progress:
+            state.steps_since_material_progress = 0
+            state.material_progress_events += 1
+            state.last_material_progress_index = len(state.events)
+            state.last_material_desc = (
+                event.progress_reason or f"{family.lower()} material"
+            )
+        else:
+            state.steps_since_material_progress = steps_since
+        if is_poll and status == "ok":
+            state.last_poll_pct = cur_pct
+            state.last_poll_done = cur_done
 
         decision = decide(state.stall_score, self.cfg)
         if decision == "RECOVER":
@@ -157,10 +187,14 @@ class ProgressGuard:
                 decision = "BLOCK"
             else:
                 state.pending_recovery = tool_call_id or f"{tool_name}:{len(state.events)}"
-        self._record(signals, decision, tool_name, session_id, turn_id, state)
+        self._record(signals, decision, tool_name, session_id, turn_id, state,
+                     material=event.material_progress)
         debug_line(
             self.cfg, tool_name, signals, state.stall_score, decision,
             session_id, turn_id,
+            family=family,
+            steps=state.steps_since_material_progress,
+            material=event.material_progress,
         )
 
     # -- thinking loop detection -------------------------------------------
@@ -174,10 +208,12 @@ class ProgressGuard:
         iteration: Any = None,
         **_: Any,
     ) -> None:
-        """Watch reasoning deltas for a pure thinking loop (no tool calls).
+        """Watch reasoning deltas for pure thinking loops (no tool calls).
 
-        Requires Hermes' global ``plugins.stream_reasoning_deltas: true``
-        opt-in; without it this hook never sees reasoning text and is inert.
+        Detects verbatim repeated segments (A A A) and ABAB/ABCABC cycles over
+        normalized reasoning blocks within one generation. Requires Hermes'
+        global ``plugins.stream_reasoning_deltas: true`` opt-in; without it
+        this hook never sees reasoning text and is inert.
         """
         rl = self.cfg.reasoning_loop
         if not self.cfg.enabled or not rl.enabled or not delta or kind != "reasoning":
@@ -203,23 +239,31 @@ class ProgressGuard:
                 state.reasoning_segments.append(line)
 
         run = repeated_thinking(list(state.reasoning_segments), rl.threshold)
+        period = reasoning_cycle(
+            list(state.reasoning_segments),
+            rl.cycle_repetitions,
+            rl.max_cycle_length,
+        )
         if self.cfg.debug and state.reasoning_deltas % 200 == 0:
             prev = ""
             if state.reasoning_segments:
                 prev = str(state.reasoning_segments[-1]).strip()[-120:]
             logger.warning(
                 "[progress-guard] reasoning deltas=%d chars=%d segments=%d "
-                "run=%d last='%s'",
+                "run=%d period=%d last='%s'",
                 state.reasoning_deltas, state.reasoning_chars,
-                len(state.reasoning_segments), run, prev,
+                len(state.reasoning_segments), run, period, prev,
             )
-        if run >= rl.threshold and not state.reasoning_flagged:
+        if not state.reasoning_flagged and (run >= rl.threshold or period >= 2):
             state.reasoning_flagged = True
             state.reasoning_run = run
             # A thinking loop is one RECOVER-level event, not a compounding
             # score: flag it, inject guidance once, and let the recovery
             # budget escalate to a hard stop if it keeps recurring.
-            self.metrics.inc("thinking_loops")
+            if period >= 2:
+                self.metrics.inc("reasoning_cycles")
+            else:
+                self.metrics.inc("thinking_loops")
             state.stall_score = max(state.stall_score, self.cfg.policy.recover_score)
             decision = decide(state.stall_score, self.cfg)
             if decision == "RECOVER":
@@ -230,7 +274,8 @@ class ProgressGuard:
                 else:
                     state.pending_thinking_recovery = True
             debug_line(
-                self.cfg, "reasoning", {"thinking_repeat": run},
+                self.cfg, "reasoning",
+                {"thinking_repeat": run, "reasoning_period": period},
                 state.stall_score, decision, session_id, turn_id,
             )
 
@@ -245,18 +290,25 @@ class ProgressGuard:
         tool_call_id: str = "",
         **_: Any,
     ) -> Optional[str]:
-        if not self.cfg.enabled or not isinstance(result, str):
+        if not self.cfg.enabled:
             return None
         state = self.registry.get(session_id, turn_id)
         if state.pending_thinking_recovery:
             state.pending_thinking_recovery = False
-            return result + "\n\n" + thinking_recovery_message()
+            msg = thinking_recovery_message()
+            return (result + "\n\n" + msg) if isinstance(result, str) else msg
         if not state.pending_recovery:
             return None
         if tool_call_id and tool_call_id != state.pending_recovery:
             return None  # different call — don't mislabel another result
         state.pending_recovery = None
-        return result + "\n\n" + recovery_message(list(state.events))
+        msg = recovery_message(
+            list(state.events),
+            family_trail_value=family_trail(list(state.events)),
+            steps=state.steps_since_material_progress,
+            last_progress=state.last_material_desc,
+        )
+        return (result + "\n\n" + msg) if isinstance(result, str) else msg
 
     # -- blocking ----------------------------------------------------------
 
@@ -271,7 +323,12 @@ class ProgressGuard:
             return None
         state = self.registry.get(session_id, turn_id)
         if state.hard_stop or state.stall_score >= self.cfg.policy.block_score:
-            self.metrics.inc("hard_stops")
+            if state.blocked_once:
+                # the model keeps trying to work after the hard stop fired
+                self.metrics.inc("blocked_calls_after_hard_stop")
+            else:
+                self.metrics.inc("hard_stops")
+            state.blocked_once = True
             debug_line(
                 self.cfg, tool_name, {}, state.stall_score, "HARD_STOP",
                 session_id, turn_id,
@@ -281,17 +338,47 @@ class ProgressGuard:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def on_session_start(
+        self, session_id: str = "", model: str = "", platform: str = "", **_: Any
+    ) -> None:
+        # A brand-new session begins a clean trajectory.
+        self.registry.reset_session(session_id)
+
     def on_session_end(
         self, task_id: str = "", session_id: str = "", turn_id: str = "", **_: Any
     ) -> None:
-        self.registry.drop_session(session_id or task_id)
+        sid = session_id or task_id
+        if not sid:
+            return
+        state = self.registry._turns.get((sid, turn_id or ""))
+        if state is not None and len(state.events):
+            traj = self.registry.get_session(sid)
+            fams = [e.family for e in state.events if e.family]
+            for f in fams[-8:]:
+                traj.recent_families.append(f)
+            for e in state.events:
+                if e.status == "error" and (e.failure_sig or e.error_class):
+                    traj.recent_failure_signatures.append(e.failure_sig or e.error_class or "")
+            if state.material_progress_events:
+                traj.last_material_progress = state.last_material_desc or "material event"
+            traj.carryovers += 1
+            self.metrics.inc("session_trajectory_carryovers")
+        self.registry.drop(sid, turn_id or "")
+
+    def on_session_finalize(
+        self, session_id: str = "", platform: str = "", **_: Any
+    ) -> None:
+        # Real session teardown -> drop session trajectory + turns.
+        if session_id:
+            self.registry.drop_session(session_id)
 
     def on_session_reset(self, **_: Any) -> None:
         self.registry.clear()
 
     # -- metrics -----------------------------------------------------------
 
-    def _record(self, signals, decision, tool_name, session_id, turn_id, state) -> None:
+    def _record(self, signals, decision, tool_name, session_id, turn_id, state,
+                material=False) -> None:
         m = self.metrics
         er = self.cfg.exact_repeat
         ir = self.cfg.identical_result
@@ -304,6 +391,12 @@ class ProgressGuard:
             m.inc("repeated_failures")
         if self.cfg.cycle.enabled and signals["cycle"]:
             m.inc("cycles_detected")
+        if self.cfg.family_cycle.enabled and signals["family_cycle"] >= 2:
+            m.inc("action_family_cycles")
+        if self.cfg.canonical.enabled and signals["canonical_matches"] >= 2:
+            m.inc("canonical_action_matches")
+        if material:
+            m.inc("material_progress_events")
         if decision == "RECOVER":
             m.inc("recoveries_triggered")
         if decision == "BLOCK":

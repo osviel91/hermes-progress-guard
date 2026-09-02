@@ -1,4 +1,10 @@
-"""Unit tests: policy scoring + decisions (handoff §11, §15, §20)."""
+"""Unit tests: policy scoring + decisions under Phase 1.6 semantics (handoff §24).
+
+Successful mutation ≠ material progress: only a Hermes-confirmed landed file
+mutation decays, and novelty (changed result/query) never decays by itself.
+Steps-since-material-progress amplifies detector evidence but never fires
+recovery on its own.
+"""
 
 from hermes_plugins.progress_guard import detectors, policy
 from hermes_plugins.progress_guard.config import ProgressGuardConfig
@@ -8,10 +14,13 @@ def _cfg(**overrides):
     return ProgressGuardConfig.from_mapping(overrides)
 
 
-def _score(events, cfg=None, event=None, prev=None):
+def _score(events, cfg=None, event=None, prev=None, steps=None):
     cfg = cfg or _cfg()
     signals = detectors.evaluate(events, cfg)
-    return policy.score_delta(signals, cfg, event=event, prev_result_fingerprint=prev)
+    return policy.score_delta(
+        signals, cfg, event=event, prev_result_fingerprint=prev,
+        steps_since_material_progress=steps,
+    )
 
 
 def test_legit_polling_never_accumulates(ev):
@@ -28,21 +37,97 @@ def test_legit_polling_never_accumulates(ev):
     assert score == 0  # never triggers recovery
 
 
-def test_successful_mutation_decays_score(ev):
+def test_landed_mutation_decays_score(ev):
+    # patch Hermes confirmed landed (success: true) -> strong material decay
     cfg = _cfg()
-    event = ev("patch", {"f": "a"}, "applied", is_mutation=True)
+    event = ev(
+        "patch", {"f": "a"}, '{"success": true}',
+        is_mutation=True, mutation_landed=True, material=True,
+    )
     signals = detectors.evaluate([event], cfg)
     delta = policy.score_delta(signals, cfg, event=event, prev_result_fingerprint=None)
     assert delta == -3  # floor handled by caller clamp
 
 
-def test_changed_result_decays(ev):
+def test_mutation_without_landed_does_not_decay(ev):
+    # mutation "ok" with no landed proof is NOT material progress (handoff §4)
+    cfg = _cfg()
+    event = ev("patch", {"f": "a"}, "applied", is_mutation=True)
+    signals = detectors.evaluate([event], cfg)
+    delta = policy.score_delta(signals, cfg, event=event, prev_result_fingerprint=None)
+    assert delta == 0
+
+
+def test_novel_result_does_not_decay(ev):
+    # changed result / different output is novelty, not progress (handoff §10)
     cfg = _cfg()
     a = ev("search", {"q": "x"}, "r1")
     b = ev("search", {"q": "x"}, "r2")
     signals = detectors.evaluate([a, b], cfg)
     delta = policy.score_delta(signals, cfg, event=b, prev_result_fingerprint=a.result_fingerprint)
+    assert delta == 0
+
+
+def test_material_progress_decays_even_without_mutation(ev):
+    # a poll that visibly advanced is material progress (-2 decay) (handoff §15)
+    cfg = _cfg()
+    event = ev(
+        "job_poll", {"id": "j1"}, "40%",
+        is_poll=True, material=True, poll_pct=40,
+    )
+    signals = detectors.evaluate([event], cfg)
+    delta = policy.score_delta(signals, cfg, event=event, prev_result_fingerprint=None)
     assert delta == -2
+
+
+def test_novelty_without_progress_never_accumulates(ev):
+    # 4 distinct searches with distinct results: no detector fires, no decay,
+    # score stays 0 -> CONTINUE (handoff §24 "novelty-without-progress")
+    cfg = _cfg()
+    score = 0
+    prev = None
+    for q in ["alpha", "beta", "gamma", "delta"]:
+        event = ev("search", {"query": q}, f"result-{q}")
+        signals = detectors.evaluate([event], cfg)
+        delta = policy.score_delta(signals, cfg, event=event, prev_result_fingerprint=prev)
+        score = max(0, score + delta)
+        prev = event.result_fingerprint
+    assert score == 0
+    assert policy.decide(score, cfg) == "CONTINUE"
+
+
+def test_steps_bonus_amplifies_detector_evidence(ev):
+    # persistent identical-result stagnation with many steps since material
+    # progress earns a small bonus, but only when a detector already fired.
+    cfg = _cfg()
+    events = []
+    for q in ["A", "B", "C", "D"]:
+        events.append(ev("search", {"query": q}, "same-result"))
+    signals = detectors.evaluate(events, cfg)
+    # identical_result magnitude 4 >= threshold 3, no cycle active
+    assert signals["identical_result"] >= cfg.identical_result.threshold
+    assert signals["cycle"] is False and signals["family_cycle"] == 0
+    base = policy.score_delta(signals, cfg, event=events[-1],
+                              steps_since_material_progress=2)
+    boosted = policy.score_delta(signals, cfg, event=events[-1],
+                                 steps_since_material_progress=10)
+    assert boosted == base + cfg.steps.bonus_delta
+
+
+def test_steps_bonus_never_skips_cycle_recovery(ev):
+    # a structural A/B cycle must not be pushed past RECOVER by the steps bonus
+    cfg = _cfg()
+    events = []
+    for i in range(4):
+        events.append(ev("A", {"i": i}, f"r{i}a"))
+        events.append(ev("B", {"i": i}, f"r{i}b"))
+    signals = detectors.evaluate(events, cfg)
+    assert signals["cycle"] is True
+    with_steps = policy.score_delta(
+        signals, cfg, event=events[-1], steps_since_material_progress=99
+    )
+    without = policy.score_delta(signals, cfg, event=events[-1])
+    assert with_steps == without  # bonus suppressed while a cycle escalates
 
 
 def test_exact_repeat_escalates_to_block(ev):
@@ -102,6 +187,7 @@ def test_disabled_detectors_produce_zero(ev):
         exact_repeat={"enabled": False},
         identical_result={"enabled": False},
         cycle={"enabled": False},
+        family_cycle={"enabled": False},
         repeated_failure={"enabled": False},
     )
     events = [

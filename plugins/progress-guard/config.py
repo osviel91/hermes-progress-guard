@@ -115,14 +115,17 @@ class RepeatedFailureConfig:
 class ReasoningLoopConfig:
     """Repeated identical reasoning segments while the LLM streams thinking.
 
-    Catches pure thinking loops that emit no tool calls. Requires the global
-    Hermes opt-in ``plugins.stream_reasoning_deltas: true`` for reasoning
-    deltas to reach ``on_stream_delta`` at all; without it this detector is
-    inert (safe default).
+    Catches pure thinking loops that emit no tool calls, and ABAB/ABCABC
+    cycles over normalized reasoning blocks within one generation. Requires
+    the global Hermes opt-in ``plugins.stream_reasoning_deltas: true`` for
+    reasoning deltas to reach ``on_stream_delta`` at all; without it this
+    detector is inert (safe default).
     """
 
     enabled: bool = True
     threshold: int = 3
+    cycle_repetitions: int = 2
+    max_cycle_length: int = 3
 
     @classmethod
     def from_mapping(cls, m: Any) -> "ReasoningLoopConfig":
@@ -130,6 +133,8 @@ class ReasoningLoopConfig:
         return cls(
             enabled=_as_bool(m.get("enabled"), True),
             threshold=_as_int(m.get("threshold"), 3),
+            cycle_repetitions=_as_int(m.get("cycle_repetitions"), 2),
+            max_cycle_length=_as_int(m.get("max_cycle_length"), 3),
         )
 
 
@@ -159,6 +164,74 @@ class RecoveryConfig:
         return cls(max_attempts=_as_int(m.get("max_attempts"), 2))
 
 
+@dataclass
+class FamilyCycleConfig:
+    """Cycle detection over action-family trajectories (READ/SEARCH/...)."""
+
+    enabled: bool = True
+    window: int = 10
+    max_cycle_length: int = 3
+    repetitions: int = 2
+
+    @classmethod
+    def from_mapping(cls, m: Any) -> "FamilyCycleConfig":
+        m = m if isinstance(m, dict) else {}
+        return cls(
+            enabled=_as_bool(m.get("enabled"), True),
+            window=_as_int(m.get("window"), 10),
+            max_cycle_length=_as_int(m.get("max_cycle_length"), 3),
+            repetitions=_as_int(m.get("repetitions"), 2),
+        )
+
+
+@dataclass
+class StepsConfig:
+    """Steps-since-material-progress as an independent stagnation signal.
+
+    Tracks actions since the last material-progress event. By itself it does
+    not trigger recovery (exploration with no detector evidence must not stall);
+    it amplifies detector evidence when the threshold is exceeded and is
+    surfaced in metrics, debug lines and recovery messages.
+    """
+
+    enabled: bool = True
+    bonus_threshold: int = 6
+    bonus_delta: int = 1
+
+    @classmethod
+    def from_mapping(cls, m: Any) -> "StepsConfig":
+        m = m if isinstance(m, dict) else {}
+        return cls(
+            enabled=_as_bool(m.get("enabled"), True),
+            bonus_threshold=_as_int(m.get("bonus_threshold"), 6),
+            bonus_delta=_as_int(m.get("bonus_delta"), 1),
+        )
+
+
+@dataclass
+class MaterialProgressConfig:
+    """Whether material-progress assessment is active at all."""
+
+    enabled: bool = True
+
+    @classmethod
+    def from_mapping(cls, m: Any) -> "MaterialProgressConfig":
+        m = m if isinstance(m, dict) else {}
+        return cls(enabled=_as_bool(m.get("enabled"), True))
+
+
+@dataclass
+class CanonicalConfig:
+    """Semantic-lite canonical action keys (no embeddings)."""
+
+    enabled: bool = True
+
+    @classmethod
+    def from_mapping(cls, m: Any) -> "CanonicalConfig":
+        m = m if isinstance(m, dict) else {}
+        return cls(enabled=_as_bool(m.get("enabled"), True))
+
+
 DEFAULT_IGNORED_FIELDS = ("timestamp", "request_id", "trace_id")
 
 
@@ -169,8 +242,12 @@ class ProgressGuardConfig:
     exact_repeat: ExactRepeatConfig = field(default_factory=ExactRepeatConfig)
     identical_result: IdenticalResultConfig = field(default_factory=IdenticalResultConfig)
     cycle: CycleConfig = field(default_factory=CycleConfig)
+    family_cycle: FamilyCycleConfig = field(default_factory=FamilyCycleConfig)
     repeated_failure: RepeatedFailureConfig = field(default_factory=RepeatedFailureConfig)
     reasoning_loop: ReasoningLoopConfig = field(default_factory=ReasoningLoopConfig)
+    steps: StepsConfig = field(default_factory=StepsConfig)
+    material_progress: MaterialProgressConfig = field(default_factory=MaterialProgressConfig)
+    canonical: CanonicalConfig = field(default_factory=CanonicalConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     ignored_fields: tuple = field(default_factory=lambda: DEFAULT_IGNORED_FIELDS)
@@ -185,8 +262,14 @@ class ProgressGuardConfig:
             exact_repeat=ExactRepeatConfig.from_mapping(m.get("exact_repeat")),
             identical_result=IdenticalResultConfig.from_mapping(m.get("identical_result")),
             cycle=CycleConfig.from_mapping(m.get("cycle")),
+            family_cycle=FamilyCycleConfig.from_mapping(m.get("family_cycle")),
             repeated_failure=RepeatedFailureConfig.from_mapping(m.get("repeated_failure")),
             reasoning_loop=ReasoningLoopConfig.from_mapping(m.get("reasoning_loop")),
+            steps=StepsConfig.from_mapping(m.get("steps")),
+            material_progress=MaterialProgressConfig.from_mapping(
+                m.get("material_progress")
+            ),
+            canonical=CanonicalConfig.from_mapping(m.get("canonical")),
             policy=PolicyConfig.from_mapping(m.get("policy")),
             recovery=RecoveryConfig.from_mapping(m.get("recovery")),
             ignored_fields=_as_str_tuple(
@@ -216,13 +299,24 @@ class ProgressGuardConfig:
                 k: get(f"cycle.{k}", None)
                 for k in ("enabled", "window", "max_cycle_length", "repetitions")
             },
-            "repeated_failure": {
-                k: get(f"repeated_failure.{k}", None)
-                for k in ("enabled", "threshold")
+            "family_cycle": {
+                k: get(f"family_cycle.{k}", None)
+                for k in ("enabled", "window", "max_cycle_length", "repetitions")
             },
+            "steps": {
+                k: get(f"steps.{k}", None)
+                for k in ("enabled", "bonus_threshold", "bonus_delta")
+            },
+            "material_progress": {
+                k: get(f"material_progress.{k}", None) for k in ("enabled",)
+            },
+            "canonical": {k: get(f"canonical.{k}", None) for k in ("enabled",)},
             "reasoning_loop": {
                 k: get(f"reasoning_loop.{k}", None)
-                for k in ("enabled", "threshold")
+                for k in (
+                    "enabled", "threshold",
+                    "cycle_repetitions", "max_cycle_length",
+                )
             },
             "policy": {
                 k: get(f"policy.{k}", None)

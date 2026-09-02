@@ -2,14 +2,20 @@
 
 Each detector is windowed, cheap (O(window) scans over fingerprints) and
 returns a magnitude the policy can escalate on — not a boolean. Polling tools
-are exempt from identical_result; cycles require >= 2 distinct tools so plain
-same-tool polling never registers as a cycle.
+are exempt from identical_result; cycles require >= 2 distinct entries so plain
+same-tool polling never registers as a cycle, and any period containing a
+mutating tool is treated as iterative development (progress), not a loop.
+
+Cycles run on two levels (handoff §8): the exact tool-name trajectory and the
+action-family trajectory (READ/SEARCH/...), so read_file -> grep -> search_files
+oscillation is visible even when the concrete tools vary.
 """
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .events import ToolEvent
 
@@ -17,9 +23,9 @@ from .events import ToolEvent
 def exact_repeat(events: Sequence[ToolEvent], cfg: Any) -> int:
     """Longest consecutive run of identical (tool, args_fingerprint).
 
-    Poll tools (``process``, ``*_poll``, ``*_get_result``) are exempt: they
-    are legitimately re-invoked with identical args, so a poll between calls
-    breaks the run instead of counting toward it (handoff §15).
+    Poll tools (``process_manage``, ``*_poll``, ``*_get_result``) are exempt:
+    they are legitimately re-invoked with identical args, so a poll between
+    calls breaks the run instead of counting toward it (handoff §15).
     """
     if not cfg.enabled:
         return 0
@@ -54,16 +60,22 @@ def identical_result(events: Sequence[ToolEvent], cfg: Any) -> int:
     return max((len(v) for v in actions_per_result.values()), default=0)
 
 
-def cycle(events: Sequence[ToolEvent], cfg: Any) -> bool:
-    """Short periodic patterns in the tool-name sequence (A B A B, A B C A B C).
+def find_cycle(
+    events: Sequence[ToolEvent],
+    cfg: Any,
+    key_fn: Callable[[ToolEvent], Any],
+) -> int:
+    """Smallest periodic block length (>=2) at the tail of the event window.
 
-    Checks periods 2..max_cycle_length: the window tail must consist of
-    ``repetitions`` identical blocks whose period contains >= 2 distinct tools.
+    The tail must consist of ``repetitions`` identical blocks whose period has
+    >= 2 distinct keys, and no event inside the period may be mutating
+    (write/run iteration is development progress, not a loop — handoff §16).
+    Returns the period length, or 0 when no cycle is found.
     """
     if not cfg.enabled:
-        return False
-    names = [e.tool_name for e in events]
-    window = names[-cfg.window:] if len(names) > cfg.window else names
+        return 0
+    keys = [key_fn(e) for e in events]
+    window = keys[-cfg.window:] if len(keys) > cfg.window else keys
     for length in range(2, cfg.max_cycle_length + 1):
         span = length * cfg.repetitions
         if len(window) < span:
@@ -72,18 +84,43 @@ def cycle(events: Sequence[ToolEvent], cfg: Any) -> bool:
         base = tail[:length]
         if len(set(base)) < 2:
             continue
-        if any(e.is_mutation for e in events if e.tool_name in base):
-            # write_file -> terminal -> write_file -> terminal is iterative
-            # development (write, run, tweak, run), i.e. progress — not a
-            # loop. A mutating tool in the period means each repetition
-            # changes state (handoff §16); reads/searches don't.
+        if any(e.is_mutation for e in events[-len(window):][-span:]):
             continue
         if all(
             tail[i * length:(i + 1) * length] == base
             for i in range(cfg.repetitions)
         ):
-            return True
-    return False
+            return length
+    return 0
+
+
+def cycle(events: Sequence[ToolEvent], cfg: Any) -> bool:
+    """Short periodic patterns in the exact tool-name trajectory."""
+    return bool(find_cycle(events, cfg, lambda e: e.tool_name))
+
+
+def family_cycle(events: Sequence[ToolEvent], cfg: Any) -> int:
+    """Cycle length over the action-family trajectory (READ/SEARCH/...).
+
+    Catches read_file -> grep -> search_files oscillation that a concrete
+    tool-name cycle misses. Returns 0 when no family cycle is detected.
+    """
+    return find_cycle(events, cfg, lambda e: e.family)
+
+
+def canonical_matches(events: Sequence[ToolEvent]) -> int:
+    """Max number of events sharing one canonical action key.
+
+    Informational only (semantic-lite): two queries that differ only in word
+    order or casing map to the same canonical key. Never used to score by
+    itself — novelty is not stagnation.
+    """
+    counts: Dict[str, int] = defaultdict(int)
+    for e in events:
+        if e.status != "ok" or not e.canonical_action:
+            continue
+        counts[e.canonical_action] += 1
+    return max(counts.values(), default=0)
 
 
 def repeated_failure(events: Sequence[ToolEvent], cfg: Any) -> int:
@@ -107,17 +144,24 @@ def repeated_failure(events: Sequence[ToolEvent], cfg: Any) -> int:
     return max(counts.values(), default=0)
 
 
-def repeated_thinking(segments: Sequence[str], threshold: int) -> int:
-    """Longest consecutive run of identical reasoning segments.
+_WS = re.compile(r"\s+")
 
-    Segments are the completed, stripped lines of the ``kind="reasoning"``
-    stream (fed from ``on_stream_delta``). A pure thinking loop repeats the
-    same block verbatim dozens of times; consecutive identical segments is
-    the cheap deterministic signal (no embeddings).
+
+def normalize_segment(segment: str) -> str:
+    """Cheap normalization for a reasoning block: whitespace + casing."""
+    return _WS.sub(" ", (segment or "").strip()).lower()
+
+
+def repeated_thinking(segments: Sequence[str], threshold: int) -> int:
+    """Longest consecutive run of identical normalized reasoning segments.
+
+    A pure thinking loop repeats the same block verbatim dozens of times;
+    consecutive identical segments is the cheap deterministic signal (no
+    embeddings).
     """
     best, run, prev = 0, 0, None
     for s in segments:
-        s = s.strip()
+        s = normalize_segment(s)
         if not s:
             continue
         run = run + 1 if s == prev else 1
@@ -127,11 +171,41 @@ def repeated_thinking(segments: Sequence[str], threshold: int) -> int:
     return best
 
 
+def reasoning_cycle(
+    segments: Sequence[str], repetitions: int, max_cycle_length: int = 3
+) -> int:
+    """ABAB / ABCABC period over normalized reasoning segments (handoff §16).
+
+    Returns the period length (>=2) when the tail repeats ``repetitions``
+    times with >= 2 distinct normalized blocks, else 0.
+    """
+    norm = [normalize_segment(s) for s in segments]
+    norm = [s for s in norm if s]
+    if len(norm) < 2 * repetitions:
+        return 0
+    for length in range(2, max_cycle_length + 1):
+        span = length * repetitions
+        if len(norm) < span:
+            continue
+        tail = norm[-span:]
+        base = tail[:length]
+        if len(set(base)) < 2:
+            continue
+        if all(
+            tail[i * length:(i + 1) * length] == base
+            for i in range(repetitions)
+        ):
+            return length
+    return 0
+
+
 def evaluate(events: Sequence[ToolEvent], cfg: Any) -> Dict[str, Any]:
     """All signals at once; the hooks pass the result to the policy."""
     return {
         "exact_repeat": exact_repeat(events, cfg.exact_repeat),
         "identical_result": identical_result(events, cfg.identical_result),
         "cycle": cycle(events, cfg.cycle),
+        "family_cycle": family_cycle(events, cfg.family_cycle),
+        "canonical_matches": canonical_matches(events),
         "repeated_failure": repeated_failure(events, cfg.repeated_failure),
     }

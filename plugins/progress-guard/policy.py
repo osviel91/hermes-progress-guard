@@ -1,9 +1,11 @@
-"""Policy engine: turns detector signals into a stall score delta and a
-decision (handoff §11). Weights are configurable in ``PolicyConfig``.
+"""Policy engine (handoff §11-§13): detector signals -> score delta + decision.
 
-Evidence of progress (a successful mutation, or an ok result that materially
-changed) pushes the score down; detector magnitudes push it up, scaled by how
-far past threshold the magnitude is so persistent loops escalate to block.
+Progress evidence only counts when it is *material*: a mutation Hermes
+confirmed landed (-3), or a poll that visibly advanced/completed (-2). Novelty
+alone (different result, fresh query, new reasoning) is not progress and does
+not decay the score. Steps since the last material progress amplify detector
+evidence once past a threshold, but never trigger recovery by themselves —
+legitimate exploration must not become a false stall.
 """
 
 from __future__ import annotations
@@ -13,45 +15,73 @@ from typing import Any, Dict, Optional
 from .events import ToolEvent
 
 
-def score_delta(
-    signals: Dict[str, Any], cfg: Any, event: Optional[ToolEvent] = None,
-    prev_result_fingerprint: Optional[str] = None,
-) -> int:
+def _detector_fired(signals: Dict[str, Any], cfg: Any) -> bool:
     er = cfg.exact_repeat
     ir = cfg.identical_result
     rf = cfg.repeated_failure
-    detector_fired = (
+    return bool(
         (er.enabled and signals["exact_repeat"] >= er.threshold)
         or (ir.enabled and signals["identical_result"] >= ir.threshold)
         or (rf.enabled and signals["repeated_failure"] >= rf.threshold)
         or (cfg.cycle.enabled and signals["cycle"])
+        or (cfg.family_cycle.enabled and signals["family_cycle"] >= 2)
     )
+
+
+def score_delta(
+    signals: Dict[str, Any], cfg: Any, event: Optional[ToolEvent] = None,
+    prev_result_fingerprint: Optional[str] = None,
+    steps_since_material_progress: Optional[int] = None,
+) -> int:
+    del prev_result_fingerprint  # novelty is no longer a decay signal
+    er = cfg.exact_repeat
+    ir = cfg.identical_result
+    rf = cfg.repeated_failure
+    fired = _detector_fired(signals, cfg)
 
     delta = 0
 
-    # Progress evidence only counts when no detector is currently firing:
-    # a cycle or repeat that merely changes its output every step (A B A B
-    # with fresh results) must still accumulate, while genuine polling and
-    # diverse work stay at zero (handoff §15).
-    if event is not None and not detector_fired:
-        changed = (
-            prev_result_fingerprint is not None
-            and event.result_fingerprint != prev_result_fingerprint
-        )
-        if event.is_mutation and event.status == "ok":
-            delta -= 3  # successful state mutation = strong progress
-        elif event.status == "ok" and changed:
-            delta -= 2  # materially changed result = progress (covers polling)
+    # Material-progress decay only counts when no detector is firing.
+    if event is not None and not fired and event.status == "ok":
+        if event.material_progress:
+            if event.mutation_landed:
+                delta -= 3  # Hermes confirmed the file mutation landed
+            else:
+                delta -= 2  # poll visibly advanced/completed
 
-    if detector_fired:
-        if signals["exact_repeat"] >= er.threshold:
+    if fired:
+        # Identical failing repetitions are already counted by
+        # repeated_failure (+1 each); exact_repeat measures the same run of
+        # identical calls, so stacking both would inflate escalation and skip
+        # the guided RECOVER band (3 -> 9 in one step instead of passing 5/6).
+        rf_firing = rf.enabled and signals["repeated_failure"] >= rf.threshold
+        if er.enabled and not rf_firing and signals["exact_repeat"] >= er.threshold:
             delta += 2 * (signals["exact_repeat"] - er.threshold + 1)
-        if signals["identical_result"] >= ir.threshold:
+        if ir.enabled and signals["identical_result"] >= ir.threshold:
             delta += 2 * (signals["identical_result"] - ir.threshold + 1)
-        if signals["repeated_failure"] >= rf.threshold:
+        if rf.enabled and signals["repeated_failure"] >= rf.threshold:
             delta += 1 * (signals["repeated_failure"] - rf.threshold + 1)
-        if signals["cycle"]:
+        if cfg.cycle.enabled and signals["cycle"]:
             delta += 2
+        if cfg.family_cycle.enabled and signals["family_cycle"] >= 2:
+            delta += 2
+        # steps-since-material-progress amplifies only existing detector
+        # evidence (handoff §10): never fires recovery by itself, and never
+        # while a structural tool/family cycle is already escalating (those
+        # reach BLOCK on their own and must not skip the guided RECOVER
+        # stage). It adds value when novelty-only evidence (identical_result,
+        # repeated_failure) persists without a clear periodic pattern.
+        sc = cfg.steps
+        cycle_active = (cfg.cycle.enabled and signals["cycle"]) or (
+            cfg.family_cycle.enabled and signals["family_cycle"] >= 2
+        )
+        if (
+            sc.enabled
+            and not cycle_active
+            and steps_since_material_progress is not None
+            and steps_since_material_progress >= sc.bonus_threshold
+        ):
+            delta += sc.bonus_delta
 
     return delta
 

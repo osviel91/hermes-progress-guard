@@ -23,3 +23,11 @@ class ToolEvent:
     tool_call_id: str = ""
     timestamp: float = 0.0
     failure_sig: Optional[str] = None
+    # Phase 1.6: action family / canonical key / material-progress verdict.
+    family: str = ""
+    canonical_action: str = ""
+    mutation_landed: bool = False
+    material_progress: bool = False
+    progress_reason: str = ""
+    poll_pct: Optional[int] = None
+    poll_done: bool = False

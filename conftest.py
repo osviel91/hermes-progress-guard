@@ -146,9 +146,16 @@ def ev():
         is_mutation=False,
         is_poll=False,
         call_id="",
+        family=None,
+        canonical_action="",
+        mutation_landed=False,
+        material=False,
+        poll_pct=None,
+        poll_done=False,
     ):
         from hermes_plugins.progress_guard import fingerprint, normalize
         from hermes_plugins.progress_guard.events import ToolEvent
+        from hermes_plugins.progress_guard.families import classify_action
 
         # default ignored fields for fingerprinting parity with the guard
         ignored = ("timestamp", "request_id", "trace_id")
@@ -169,6 +176,12 @@ def ev():
             is_mutation=is_mutation,
             is_poll=is_poll,
             tool_call_id=call_id,
+            family=family if family is not None else classify_action(tool, args),
+            canonical_action=canonical_action,
+            mutation_landed=mutation_landed,
+            material_progress=material,
+            poll_pct=poll_pct,
+            poll_done=poll_done,
         )
 
     return _ev
