@@ -8,7 +8,7 @@ as a Hermes Python plugin. Complements Hermes' built-in tool guardrails
 
 ## Status
 
-Phase 1.6 implemented and tested (107 tests passing, `.venv/bin/python -m
+Phase 1.6 implemented and tested (110 tests passing, `.venv/bin/python -m
 pytest tests/ -q`). Version `0.2.0`, registered hooks: `pre_tool_call`,
 `post_tool_call`, `transform_tool_result`, `on_stream_delta`, and the session
 lifecycle hooks `on_session_start` / `on_session_end` / `on_session_finalize`
@@ -168,8 +168,15 @@ decision=…` plus per-detector counters.
 - Terminal/`execute_code` success alone is never material progress (no
   parseable completion proof); verification-driven progress rules are
   deferred.
+- Real-session evaluation found one deliberate blind spot: repeated attempts
+  to fix the *same underlying bug* can escape detection when every retry lands
+  a file mutation and shifts the exact failure signature (for example, the same
+  self-check failing on lines 110, 112, 115, then 117). This is treated as
+  novelty/progress today, so Progress Guard stays silent. Closing that gap
+  needs a future semantic-lite failure grouping rule, not a looser mutation
+  heuristic.
 - No hook kwarg distinguishes a new user turn from an internal continuation
   (`/goal`, auto-continue); every `run_conversation()` mints a fresh
   `turn_id`. The session trajectory is folded per turn under the *session*,
-  which is the conservative middle ground — see the analysis doc §lifecycle.
+  which is the conservative middle ground.
 - Reasoning ABAB/ABCABC detection is within-one-iteration only.
