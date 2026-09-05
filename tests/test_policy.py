@@ -194,3 +194,34 @@ def test_disabled_detectors_produce_zero(ev):
         ev("A", {"x": 1}, "r"), ev("A", {"x": 1}, "r"), ev("A", {"x": 1}, "r"),
     ]
     assert _score(events, cfg) == 0
+
+
+def test_same_failure_after_mutation_scores_conservatively(ev):
+    cfg = _cfg(repeated_failure={"enabled": False})
+    first = [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+        ev("patch", {}, '{"success": true}', is_mutation=True, mutation_landed=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+    ]
+    second = first + [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+    ]
+    assert _score(first, cfg, first[-1]) == 2
+    assert _score(second, cfg, second[-1]) == 3
+
+
+def test_session_trajectory_only_amplifies_active_signal(ev):
+    cfg = _cfg()
+    base = [ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError")]
+    signals = detectors.evaluate(base, cfg)
+    signals["session_trajectory_recurrence"] = 1
+    assert policy.score_delta(signals, cfg, event=base[-1]) == 0
+
+    active = [
+        base[0],
+        ev("patch", {}, '{"success": true}', is_mutation=True, mutation_landed=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+    ]
+    signals = detectors.evaluate(active, cfg)
+    signals["session_trajectory_recurrence"] = 1
+    assert policy.score_delta(signals, cfg, event=active[-1]) == 3

@@ -99,3 +99,27 @@ def failure_signature(
         if preview:
             msg = preview
     return f"{et}|{_denoise(msg)}"
+
+
+_COUNT_PATTERNS = (
+    re.compile(r"\b(\d+)\s+(?:tests?\s+)?failed\b"),
+    re.compile(r"\b(\d+)\s+(?:errors?|failures?)\b"),
+)
+
+
+def failure_group(failure_sig: Optional[str]) -> str:
+    """Canonical failure group: exact sig with superficial counters removed."""
+    if not failure_sig:
+        return ""
+    return re.sub(r"\b\d+\s+(?:tests?\s+)?(?:failed|errors?|failures?)\b", "N failures", failure_sig)
+
+
+def failure_count(*texts: str) -> Optional[int]:
+    """Best-effort structured failure count, only for explicit count phrases."""
+    for text in texts:
+        haystack = (text or "").lower()
+        for pattern in _COUNT_PATTERNS:
+            match = pattern.search(haystack)
+            if match:
+                return int(match.group(1))
+    return None

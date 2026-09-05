@@ -173,6 +173,11 @@ def ev():
             failure_sig=normalize.failure_signature(error_type, error_message, norm_result)
             if status == "error"
             else None,
+            failure_group=normalize.failure_group(
+                normalize.failure_signature(error_type, error_message, norm_result)
+            ) if status == "error" else None,
+            failure_count=normalize.failure_count(error_message or "", norm_result)
+            if status == "error" else None,
             is_mutation=is_mutation,
             is_poll=is_poll,
             tool_call_id=call_id,

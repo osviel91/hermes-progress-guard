@@ -228,6 +228,58 @@ def test_repeated_failure_line_number_noise_ignored(ev):
     assert _run(detectors.repeated_failure, events) == 3
 
 
+def test_same_failure_after_landed_mutation_counts_recurrence(ev):
+    events = [
+        ev("terminal", {"command": "pytest"}, status="error", error_type="tool_error", error_message="AssertionError at line 9"),
+        ev("patch", {"file": "a.py"}, '{"success": true}', is_mutation=True, mutation_landed=True, material=True),
+        ev("terminal", {"command": "pytest"}, status="error", error_type="tool_error", error_message="AssertionError at line 12"),
+        ev("terminal", {"command": "pytest"}, status="error", error_type="tool_error", error_message="AssertionError at line 15"),
+    ]
+    assert detectors.same_failure_after_mutation(events[:3]) == 1
+    assert detectors.same_failure_after_mutation(events) == 2
+
+
+def test_same_failure_after_mutation_needs_landed_mutation(ev):
+    events = [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+        ev("patch", {}, "applied", is_mutation=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+    ]
+    assert detectors.same_failure_after_mutation(events) == 0
+
+
+def test_same_failure_after_mutation_ignores_different_failure(ev):
+    events = [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="AssertionError"),
+        ev("patch", {}, '{"success": true}', is_mutation=True, mutation_landed=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="ImportError"),
+    ]
+    assert detectors.same_failure_after_mutation(events) == 0
+
+
+def test_same_failure_after_mutation_ignores_error_class_only(ev):
+    events = [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="A"),
+        ev("patch", {}, '{"success": true}', is_mutation=True, mutation_landed=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="B"),
+    ]
+    events = [
+        type(e)(**{**e.__dict__, "failure_sig": None, "failure_group": None})
+        for e in events
+    ]
+    assert detectors.same_failure_after_mutation(events) == 0
+
+
+def test_failure_improvement_suppresses_same_failure_after_mutation(ev):
+    events = [
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="2 tests failed"),
+        ev("patch", {}, '{"success": true}', is_mutation=True, mutation_landed=True),
+        ev("terminal", {}, status="error", error_type="tool_error", error_message="1 test failed"),
+    ]
+    assert detectors.failure_improvement(events) is True
+    assert detectors.same_failure_after_mutation(events) == 0
+
+
 def test_repeated_thinking_consecutive_identical(ev):
     segs = ["same thought", "same thought", "same thought"]
     assert detectors.repeated_thinking(segs, 3) == 3

@@ -36,7 +36,14 @@ from .material_progress import MaterialProgress
 from .material_progress import assess as assess_material
 from .material_progress import poll_state
 from .metrics import Metrics
-from .normalize import error_class, failure_signature, normalize_args, normalize_result
+from .normalize import (
+    error_class,
+    failure_count,
+    failure_group,
+    failure_signature,
+    normalize_args,
+    normalize_result,
+)
 from .policy import decide, score_delta
 from .recovery import (
     family_trail,
@@ -94,6 +101,7 @@ class ProgressGuard:
         state = self.registry.get(session_id, turn_id)
         if tool_call_id and state.pending_recovery and tool_call_id != state.pending_recovery:
             state.pending_recovery = None  # stale: recovery never materialized
+            state.pending_recovery_cause = ""
         if status in (None, "blocked", "cancelled"):
             return  # artifact of our own block / user cancellation — not agent behavior
 
@@ -133,15 +141,17 @@ class ProgressGuard:
                 mutation_landed=landed,
             )
 
+        fsig = failure_signature(error_type, error_message, norm_result) if status == "error" else None
+        fgroup = failure_group(fsig) if fsig else None
         event = ToolEvent(
             tool_name=tool_name,
             args_fingerprint=afp,
             result_fingerprint=rfp,
             status=status or "ok",
             error_class=error_class(error_type, error_message) if status == "error" else None,
-            failure_sig=failure_signature(error_type, error_message, norm_result)
-            if status == "error"
-            else None,
+            failure_sig=fsig,
+            failure_group=fgroup,
+            failure_count=failure_count(error_message or "", norm_result) if status == "error" else None,
             is_mutation=is_mutation,
             is_poll=is_poll,
             tool_call_id=tool_call_id or "",
@@ -156,6 +166,19 @@ class ProgressGuard:
 
         events = list(state.events)[state.evidence_from_index:] + [event]
         signals = detector_signals(events, self.cfg)
+        if (
+            event.status == "error"
+            and state.last_recovery_cause
+            and (event.failure_group or event.failure_sig or event.error_class or "") == state.last_recovery_cause
+        ):
+            signals["post_recovery_recurrence"] = 1
+        else:
+            signals["post_recovery_recurrence"] = 0
+        traj = self.registry.get_session(session_id)
+        if signals["same_failure_after_mutation"] and event.failure_group in traj.recent_failure_groups:
+            signals["session_trajectory_recurrence"] = 1
+        else:
+            signals["session_trajectory_recurrence"] = 0
         steps_since = (
             0 if event.material_progress else state.steps_since_material_progress + 1
         )
@@ -186,11 +209,17 @@ class ProgressGuard:
                 state.hard_stop = True  # budget exhausted -> escalate to hard stop
                 decision = "BLOCK"
             else:
-                state.pending_recovery = tool_call_id or f"{tool_name}:{len(state.events)}"
+                state.pending_recovery_cause = event.failure_group or event.failure_sig or event.error_class or ""
+                if state.pending_recovery_cause and state.pending_recovery_cause == state.last_recovery_cause:
+                    self.metrics.inc("suppressed_duplicate_recoveries")
+                    state.stall_score = 0
+                else:
+                    state.pending_recovery = tool_call_id or f"{tool_name}:{len(state.events)}"
                 # Fresh window + zeroed score after a delivered recovery: a
                 # strategy change is rewarded, only persistence re-escalates.
                 state.evidence_from_index = len(state.events)
-                state.stall_score = 0
+                if state.pending_recovery:
+                    state.stall_score = 0
         self._record(signals, decision, tool_name, session_id, turn_id, state,
                      material=event.material_progress)
         debug_line(
@@ -306,6 +335,9 @@ class ProgressGuard:
         if tool_call_id and tool_call_id != state.pending_recovery:
             return None  # different call — don't mislabel another result
         state.pending_recovery = None
+        if state.pending_recovery_cause:
+            state.last_recovery_cause = state.pending_recovery_cause
+            state.pending_recovery_cause = ""
         msg = recovery_message(
             list(state.events),
             family_trail_value=family_trail(list(state.events)),
@@ -363,6 +395,8 @@ class ProgressGuard:
             for e in state.events:
                 if e.status == "error" and (e.failure_sig or e.error_class):
                     traj.recent_failure_signatures.append(e.failure_sig or e.error_class or "")
+                    if e.failure_group:
+                        traj.recent_failure_groups.append(e.failure_group)
             if state.material_progress_events:
                 traj.last_material_progress = state.last_material_desc or "material event"
             traj.carryovers += 1
@@ -400,6 +434,14 @@ class ProgressGuard:
             m.inc("repeated_results")
         if rf.enabled and signals["repeated_failure"] >= rf.threshold:
             m.inc("repeated_failures")
+        if signals.get("same_failure_after_mutation", 0):
+            m.inc("same_failure_after_mutation")
+        if signals.get("failure_improvement"):
+            m.inc("failure_improvements")
+        if signals.get("post_recovery_recurrence", 0):
+            m.inc("post_recovery_recurrences")
+        if signals.get("session_trajectory_recurrence", 0):
+            m.inc("canonical_failure_matches")
         if self.cfg.cycle.enabled and signals["cycle"]:
             m.inc("cycles_detected")
         if self.cfg.family_cycle.enabled and signals["family_cycle"] >= 2:

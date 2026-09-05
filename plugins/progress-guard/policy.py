@@ -23,6 +23,8 @@ def _detector_fired(signals: Dict[str, Any], cfg: Any) -> bool:
         (er.enabled and signals["exact_repeat"] >= er.threshold)
         or (ir.enabled and signals["identical_result"] >= ir.threshold)
         or (rf.enabled and signals["repeated_failure"] >= rf.threshold)
+        or signals.get("same_failure_after_mutation", 0) >= 1
+        or signals.get("post_recovery_recurrence", 0) >= 1
         or (cfg.cycle.enabled and signals["cycle"])
         or (cfg.family_cycle.enabled and signals["family_cycle"] >= 2)
     )
@@ -61,6 +63,13 @@ def score_delta(
             delta += 2 * (signals["identical_result"] - ir.threshold + 1)
         if rf.enabled and signals["repeated_failure"] >= rf.threshold:
             delta += 1 * (signals["repeated_failure"] - rf.threshold + 1)
+        sfam = signals.get("same_failure_after_mutation", 0)
+        if sfam:
+            delta += sfam + 1
+            if signals.get("session_trajectory_recurrence", 0):
+                delta += 1
+        if signals.get("post_recovery_recurrence", 0):
+            delta += 3
         if cfg.cycle.enabled and signals["cycle"]:
             delta += 2
         if cfg.family_cycle.enabled and signals["family_cycle"] >= 2:

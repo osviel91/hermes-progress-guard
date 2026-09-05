@@ -25,6 +25,8 @@ class TurnState:
         self.blocked_once: bool = False
         self.last_result_fingerprint: Optional[str] = None
         self.pending_recovery: Optional[str] = None
+        self.pending_recovery_cause: str = ""
+        self.last_recovery_cause: str = ""
         self.pending_thinking_recovery: bool = False
         self.created_at: float = time.monotonic()
         # Index (into events) from which detectors may consider evidence.
@@ -63,6 +65,7 @@ class SessionTrajectory:
 
     recent_families: deque = field(default_factory=lambda: deque(maxlen=16))
     recent_failure_signatures: deque = field(default_factory=lambda: deque(maxlen=8))
+    recent_failure_groups: deque = field(default_factory=lambda: deque(maxlen=8))
     carryovers: int = 0
     last_material_progress: str = ""  # compact marker, e.g. "patch landed"
 

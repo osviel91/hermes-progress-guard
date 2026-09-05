@@ -145,6 +145,59 @@ def repeated_failure(events: Sequence[ToolEvent], cfg: Any) -> int:
     return max(counts.values(), default=0)
 
 
+def _failure_key(e: ToolEvent, *, include_error_class: bool = True) -> str:
+    if e.failure_group or e.failure_sig:
+        return e.failure_group or e.failure_sig or ""
+    return e.error_class or "" if include_error_class else ""
+
+
+def failure_improvement(events: Sequence[ToolEvent]) -> bool:
+    """Tail failure has a lower structured count than the same pre-mutation failure."""
+    if not events or events[-1].status != "error":
+        return False
+    cur = events[-1]
+    key = _failure_key(cur, include_error_class=False)
+    if not key or cur.failure_count is None:
+        return False
+    for i in range(len(events) - 2, -1, -1):
+        if events[i].mutation_landed:
+            for prev in reversed(events[:i]):
+                if (
+                    prev.status == "error"
+                    and _failure_key(prev, include_error_class=False) == key
+                    and prev.failure_count is not None
+                ):
+                    return cur.failure_count < prev.failure_count
+            return False
+    return False
+
+
+def same_failure_after_mutation(events: Sequence[ToolEvent]) -> int:
+    """Count same canonical failures after a landed mutation, unless improving."""
+    if not events or events[-1].status != "error" or failure_improvement(events):
+        return 0
+    cur = events[-1]
+    key = _failure_key(cur, include_error_class=False)
+    if not key:
+        return 0
+    last_mut = -1
+    for i in range(len(events) - 2, -1, -1):
+        if events[i].mutation_landed:
+            last_mut = i
+            break
+    if last_mut < 1:
+        return 0
+    if not any(
+        e.status == "error" and _failure_key(e, include_error_class=False) == key
+        for e in events[:last_mut]
+    ):
+        return 0
+    return sum(
+        1 for e in events[last_mut + 1:]
+        if e.status == "error" and _failure_key(e, include_error_class=False) == key
+    )
+
+
 _WS = re.compile(r"\s+")
 
 
@@ -209,4 +262,6 @@ def evaluate(events: Sequence[ToolEvent], cfg: Any) -> Dict[str, Any]:
         "family_cycle": family_cycle(events, cfg.family_cycle),
         "canonical_matches": canonical_matches(events),
         "repeated_failure": repeated_failure(events, cfg.repeated_failure),
+        "failure_improvement": failure_improvement(events),
+        "same_failure_after_mutation": same_failure_after_mutation(events),
     }

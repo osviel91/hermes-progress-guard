@@ -50,3 +50,16 @@ def test_error_class_distinguishes_different_failures():
 def test_error_class_empty_when_no_error():
     assert normalize.error_class(None, None) == ""
     assert normalize.error_class("", "") == ""
+
+
+def test_failure_group_collapses_failure_counts():
+    a = normalize.failure_signature("tool_error", "2 tests failed", "")
+    b = normalize.failure_signature("tool_error", "1 test failed", "")
+    assert a != b
+    assert normalize.failure_group(a) == normalize.failure_group(b)
+
+
+def test_failure_count_reads_explicit_counts_only():
+    assert normalize.failure_count("2 tests failed") == 2
+    assert normalize.failure_count("1 error") == 1
+    assert normalize.failure_count("AssertionError at line 9") is None

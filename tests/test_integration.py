@@ -481,3 +481,49 @@ def test_duplicate_write_burst_does_not_poison_legit_work(drive):
     state = guard.registry.get("s1", "t1")
     assert state.stall_score == 0  # distinct landed writes decayed the burst
     assert guard.metrics.snapshot().get("material_progress_events", 0) >= 1
+
+
+# --- Phase 2A failure recurrence scenarios ---------------------------------
+
+def test_same_failure_after_landed_mutation_recovers(drive):
+    script = [
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 9"),
+        ok("patch", {"file": "a.py"}, '{"success": true}'),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 12"),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError at line 15"),
+    ]
+    ctx, guard, records = drive(script)
+
+    assert len(_injections(records)) == 1
+    m = guard.metrics.snapshot()
+    assert m.get("same_failure_after_mutation", 0) >= 1
+
+
+def test_failure_improvement_after_landed_mutation_does_not_recover(drive):
+    script = [
+        err("terminal", {"command": "pytest"}, "tool_error", "2 tests failed"),
+        ok("patch", {"file": "a.py"}, '{"success": true}'),
+        err("terminal", {"command": "pytest"}, "tool_error", "1 test failed"),
+    ]
+    ctx, guard, records = drive(script)
+
+    assert _injections(records) == []
+    assert guard.metrics.snapshot().get("failure_improvements", 0) >= 1
+
+
+def test_post_recovery_recurrence_does_not_spam_same_guidance(drive):
+    script = [
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError"),
+        ok("patch", {"file": "a.py"}, '{"success": true}'),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError"),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError"),
+        ok("patch", {"file": "a.py"}, '{"success": true}'),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError"),
+        err("terminal", {"command": "pytest"}, "tool_error", "AssertionError"),
+    ]
+    ctx, guard, records = drive(script)
+
+    assert len(_injections(records)) == 1
+    m = guard.metrics.snapshot()
+    assert m.get("post_recovery_recurrences", 0) >= 1
+    assert m.get("suppressed_duplicate_recoveries", 0) >= 1

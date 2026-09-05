@@ -23,6 +23,8 @@ class ToolEvent:
     tool_call_id: str = ""
     timestamp: float = 0.0
     failure_sig: Optional[str] = None
+    failure_group: Optional[str] = None
+    failure_count: Optional[int] = None
     # Phase 1.6: action family / canonical key / material-progress verdict.
     family: str = ""
     canonical_action: str = ""
