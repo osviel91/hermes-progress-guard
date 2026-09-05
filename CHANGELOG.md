@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 This project follows semantic versions from `plugins/progress-guard/plugin.yaml`.
 
+## [0.3.0] - 2026-09-05
+
+### Added
+
+- Phase 2A safe failure recurrence detection after landed mutations, with canonical failure groups and explicit failure-count improvement handling.
+- Metrics for same-failure recurrence, failure improvements, post-recovery recurrence and duplicate recovery suppression.
+
+### Changed
+
+- Recovery scoring now conservatively escalates repeated canonical failures after landed mutations and avoids spamming identical recovery guidance.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

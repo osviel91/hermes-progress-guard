@@ -8,8 +8,8 @@ as a Hermes Python plugin. Complements Hermes' built-in tool guardrails
 
 ## Status
 
-Phase 1.6 implemented and tested (110 tests passing, `.venv/bin/python -m
-pytest tests/ -q`). Version `0.2.0`, registered hooks: `pre_tool_call`,
+Phase 2A implemented and tested (122 tests passing, `.venv/bin/python -m
+pytest tests/ -q`). Version `0.3.0`, registered hooks: `pre_tool_call`,
 `post_tool_call`, `transform_tool_result`, `on_stream_delta`, and the session
 lifecycle hooks `on_session_start` / `on_session_end` / `on_session_finalize`
 / `on_session_reset`.

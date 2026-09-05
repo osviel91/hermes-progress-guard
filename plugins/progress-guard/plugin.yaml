@@ -1,5 +1,5 @@
 name: progress-guard
-version: "0.2.0"
+version: "0.3.0"
 description: "Deterministic stall/loop protection for Hermes Agent. Watches the tool-call stream and detects exact-repeated calls, tool- and action-family-level cycles (ABAB/ABCABC over tools, reasoning or intent), identical stagnant results and repeated failure classes; separates material progress from mere novelty, tracks steps since the last material progress across turns via a rolling session trajectory, injects guided replan guidance when a strategy stalls and enforces a bounded recovery budget with a safe hard stop. Complementary second layer on top of Hermes built-in tool guardrails — no second LLM, no embeddings."
 author: "hermes-progress-guard"
 provides_hooks:

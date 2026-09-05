@@ -2,7 +2,7 @@
 
 ## Sources Of Truth
 
-- Current baseline: Phase 1.6, plugin version `0.2.0`, 110 tests passing.
+- Current baseline: Phase 2A, plugin version `0.3.0`, 122 tests passing.
 - `PLAN.md` is the original Phase 1 plan and Hermes hook audit; use
   `docs/plan/` for current/future phased work.
 - Active forward plans: `docs/plan/phase-2a-safe-failure-recurrence.md`,
